@@ -16,13 +16,47 @@ if (getApps().length === 0) {
 const db = getFirestore();
 const app = express();
 
-app.use(cors());
-app.use(express.json());
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+
+const app = express();
+
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+
+const app = express();
+
+// 1. Configuration CORS
+const allowedOrigins = [
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'https://roomcheck.centillion.online'
+];
+
+app.use(cors({
+    origin: function (origin, callback) {
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Accès bloqué par la politique CORS'));
+        }
+    },
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true
+}));
+
+// 2. Limite des requêtes JSON (2 Mo)
+app.use(express.json({ limit: '2mb' }));
+
+// 3. Sert tous les fichiers HTML/JS/CSS à la racine de room-checker-service
 app.use(express.static(__dirname));
 
-// Route principale
+// 4. Route d'accueil
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'login.html'));
+    res.sendFile(path.join(__dirname, 'register_hotel.html'));
 });
 
 // ==========================================
