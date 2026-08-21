@@ -16,18 +16,6 @@ if (getApps().length === 0) {
 const db = getFirestore();
 const app = express();
 
-const express = require('express');
-const cors = require('cors');
-const path = require('path');
-
-const app = express();
-
-const express = require('express');
-const cors = require('cors');
-const path = require('path');
-
-const app = express();
-
 // 1. Configuration CORS
 const allowedOrigins = [
     'http://localhost:3000',
@@ -56,7 +44,7 @@ app.use(express.static(__dirname));
 
 // 4. Route d'accueil
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'register_hotel.html'));
+    res.sendFile(path.join(__dirname, 'index.html'));
 });
 
 // ==========================================
