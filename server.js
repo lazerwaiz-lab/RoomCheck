@@ -20,7 +20,10 @@ const app = express();
 const allowedOrigins = [
     'http://localhost:3000',
     'http://127.0.0.1:3000',
-    'https://roomcheck.centillion.online'
+    'http://localhost:3001',
+    'http://127.0.0.1:3001',
+    'https://roomcheck.centillion.online',
+    'https://roomcheck-a24u.onrender.com'
 ];
 
 app.use(cors({
@@ -31,7 +34,7 @@ app.use(cors({
             callback(new Error('Accès bloqué par la politique CORS'));
         }
     },
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // OPTIONS est obligatoire pour les requêtes preflight
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true
 }));
@@ -106,26 +109,25 @@ app.post('/api/register-hotel', async (req, res) => {
         const hotelId = hotelRef.id;
 
         // CRÉATION DU COMPTE CRÉATEUR / MASTER ADMIN DANS CONFIG/USERS
-        const salt = await bcrypt.genSalt(10);
-        const passwordHash = await bcrypt.hash(password.trim(), salt);
-        const adminId = 'usr_' + Date.now() + '_creator';
+const salt = await bcrypt.genSalt(10);
+const hashedPassword = await bcrypt.hash(password.trim(), salt); // Un seul hash propre
+const adminId = 'usr_' + Date.now() + '_creator';
 
-        const creatorAdminUser = {
-            id: adminId,
-            fullName: adminName.trim(),
-            username: cleanEmail,
-            email: cleanEmail,
-            password: passwordHash,
-            passwordHash: passwordHash,
-            department: 'ADMIN',
-            role: 'superadmin',
-            isCreator: true, // Marquage spécifique pour identification
-            colorMark: 'red', // Indicateur de couleur pour les logs/outils
-            createdBy: 'SYSTEM_REGISTER',
-            createdAt: new Date().toISOString()
-        };
+const creatorAdminUser = {
+    id: adminId,
+    fullName: adminName.trim(),
+    username: cleanEmail,
+    email: cleanEmail,
+    password: hashedPassword,     // <-- On met le hash ici aussi
+    passwordHash: hashedPassword, // <-- Et ici aussi
+    department: 'ADMIN',
+    role: 'superadmin',
+    isCreator: true,
+    colorMark: 'red',
+    createdBy: 'SYSTEM_REGISTER',
+    createdAt: new Date().toISOString()
+};
 
-        // Sauvegarde directement dans config/users
         await db.collection('hotels').doc(hotelId).collection('config').doc('users').set({
             hotelId: hotelId,
             users: [creatorAdminUser],
@@ -146,7 +148,7 @@ app.post('/api/register-hotel', async (req, res) => {
 });
 
 // ==========================================
-// 2. ROUTE UNIQUE DE LOGIN (CONFIG/USERS ET FALLBACK SOUS-COLLECTION)
+// 2. ROUTE UNIQUE DE LOGIN
 // ==========================================
 app.post('/api/login', async (req, res) => {
     const { username, email, password } = req.body;
@@ -162,7 +164,6 @@ app.post('/api/login', async (req, res) => {
         let foundHotel = null;
 
         for (const hotelDoc of hotelsSnapshot.docs) {
-            // A. RECHERCHE PRINCIPALE DANS /config/users
             const configUserDoc = await hotelDoc.ref.collection('config').doc('users').get();
             if (configUserDoc.exists) {
                 const configData = configUserDoc.data();
@@ -183,7 +184,6 @@ app.post('/api/login', async (req, res) => {
                 }
             }
 
-            // B. FALLBACK DE COMPATIBILITÉ : ANCIENNE SOUS-COLLECTION /users
             const usersRef = hotelDoc.ref.collection('users');
             let userSnapshot = await usersRef.where('email', '==', identifier).get();
             if (userSnapshot.empty) {
@@ -224,6 +224,7 @@ app.post('/api/login', async (req, res) => {
 
         return res.json({
             success: true,
+            mustChangePassword: foundUser.isFirstLogin === true, // <-- Ajoute cette ligne explicite
             user: foundUser,
             hotel: {
                 id: foundHotel.id,
@@ -246,7 +247,6 @@ app.post('/api/admin/login', (req, res) => {
 // 3. GESTION DES UTILISATEURS DANS CONFIG/USERS
 // ==========================================
 
-// RÉCUPÉRATION DE TOUS LES UTILISATEURS DE CONFIG/USERS
 app.get('/api/admin/users', async (req, res) => {
     const { hotelId } = req.query;
 
@@ -275,7 +275,6 @@ app.get('/api/admin/users', async (req, res) => {
     }
 });
 
-// CRÉATION D'UN NOUVEL UTILISATEUR DANS CONFIG/USERS
 app.post('/api/admin/users', async (req, res) => {
     try {
         const { hotelId, fullName, username, password, department, role, createdBy, isCreator } = req.body;
@@ -334,7 +333,6 @@ app.post('/api/admin/users', async (req, res) => {
     }
 });
 
-// MODIFICATION D'UN UTILISATEUR DANS CONFIG/USERS
 app.put('/api/admin/users/:id', async (req, res) => {
     const userId = req.params.id;
     const { hotelId, fullName, username, department, role } = req.body;
@@ -375,12 +373,11 @@ app.put('/api/admin/users/:id', async (req, res) => {
     }
 });
 
-// RÉINITIALISATION DE MOT DE PASSE DANS CONFIG/USERS
 app.post('/api/admin/users/reset-password', async (req, res) => {
-    const { hotelId, targetUserId, newPassword } = req.body;
+    const { hotelId, targetUserId, newPassword, requesterId } = req.body;
 
-    if (!hotelId || !targetUserId || !newPassword || newPassword.trim() === '') {
-        return res.status(400).json({ success: false, message: 'Paramètres manquants pour la réinitialisation.' });
+    if (!hotelId || !targetUserId || !newPassword || newPassword.trim() === '' || !requesterId) {
+        return res.json({ success: false, message: 'Paramètres manquants pour la réinitialisation.' });
     }
 
     try {
@@ -388,31 +385,39 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
         const docSnap = await configDocRef.get();
 
         if (!docSnap.exists) {
-            return res.status(404).json({ success: false, message: 'Dossier utilisateurs introuvable.' });
+            return res.json({ success: false, message: 'Dossier utilisateurs introuvable.' });
         }
 
         let users = docSnap.data().users || [];
-        const index = users.findIndex(u => u.id === targetUserId);
 
+        // VÉRIFICATION STRICTE DU RÔLE EN BASE DE DONNÉES
+        const requester = users.find(u => u.id === requesterId || u.username === requesterId);
+        if (!requester || (requester.role || '').toLowerCase() !== 'superadmin') {
+            return res.json({ 
+                success: false, 
+                message: "Vous n'êtes pas autorisé à modifier les mots de passe." 
+            });
+        }
+
+        const index = users.findIndex(u => u.id === targetUserId);
         if (index === -1) {
-            return res.status(404).json({ success: false, message: 'Utilisateur introuvable.' });
+            return res.json({ success: false, message: 'Utilisateur introuvable.' });
         }
 
         const hashedPassword = await bcrypt.hash(newPassword.trim(), 10);
 
         users[index].password = hashedPassword;
         users[index].passwordHash = hashedPassword;
+        users[index].isFirstLogin = true; // <--- AJOUTE CETTE LIGNE ICI POUR FORCER LE CHANGEMENT AU PROCHAIN LOGIN
         users[index].updatedAt = new Date().toISOString();
 
         await configDocRef.update({ users, updatedAt: new Date().toISOString() });
         return res.json({ success: true, message: 'Mot de passe réinitialisé avec succès !' });
     } catch (error) {
-        console.error('Erreur réinitialisation mot de passe:', error);
-        return res.status(500).json({ success: false, message: error.message });
+        return res.json({ success: false, message: 'Une erreur serveur est survenue.' });
     }
 });
 
-// SUPPRESSION D'UN UTILISATEUR DANS CONFIG/USERS
 app.delete('/api/admin/users/:id', async (req, res) => {
     const userId = req.params.id;
     const { hotelId } = req.body;
@@ -440,7 +445,6 @@ app.delete('/api/admin/users/:id', async (req, res) => {
     }
 });
 
-// IMPORTATION DE MASSE DANS CONFIG/USERS
 app.post('/api/admin/config/users', async (req, res) => {
     try {
         const { hotelId, users, createdBy } = req.body;
@@ -449,9 +453,22 @@ app.post('/api/admin/config/users', async (req, res) => {
             return res.status(400).json({ error: 'Données invalides ou liste utilisateurs absente.' });
         }
 
+        // 1. Récupération du document existant pour sécuriser le créateur
+        const docRef = db.collection('hotels').doc(hotelId).collection('config').doc('users');
+        const docSnap = await docRef.get();
+        const existingUsers = docSnap.exists ? (docSnap.data().users || []) : [];
+
+        // Isoler le(s) créateur(s) du compte
+        const creators = existingUsers.filter(u => u.isCreator === true || u.isCreator === 'true');
+
+        // 2. Traitement et hachage des nouveaux utilisateurs importés
         const processedUsers = await Promise.all(users.map(async (user, index) => {
-            const isHashed = user.password && user.password.startsWith('$2a$');
-            const hashedPassword = isHashed ? user.password : await bcrypt.hash(user.password || '123456', 10);
+            const rawPassword = user.password || user.pass || '123456';
+
+            let hashedPassword = rawPassword;
+            if (!rawPassword.startsWith('$2a$') && !rawPassword.startsWith('$2b$') && !rawPassword.startsWith('$2y$')) {
+                hashedPassword = await bcrypt.hash(rawPassword.trim(), 10);
+            }
 
             return {
                 ...user,
@@ -463,20 +480,29 @@ app.post('/api/admin/config/users', async (req, res) => {
             };
         }));
 
-        await db.collection('hotels').doc(hotelId).collection('config').doc('users').set({
+        // 3. Filtrer les doublons de l'import pour ne pas dupliquer le créateur
+        const filteredImported = processedUsers.filter(pUser => 
+            !creators.some(c => (c.email && pUser.email && c.email.toLowerCase() === pUser.email.toLowerCase()) || c.id === pUser.id)
+        );
+
+        // 4. Fusionner : Le créateur reste intact au début du tableau
+        const finalUsers = [...creators, ...filteredImported];
+
+        await docRef.set({
             hotelId,
-            users: processedUsers,
+            users: finalUsers,
             updatedAt: new Date().toISOString()
         });
 
-        res.json({ message: 'Importation enregistrée avec hachage et IDs uniques', users: processedUsers });
+        res.json({ message: 'Importation enregistrée sans impacter le créateur', users: finalUsers });
     } catch (error) {
+        console.error("Erreur import users:", error);
         res.status(500).json({ error: error.message });
     }
 });
 
 // ==========================================
-// 4. AUTRES CONFIGURATIONS (ROLES, STRUCTURE)
+// 4. AUTRES CONFIGURATIONS
 // ==========================================
 app.get('/api/admin/config/roles', async (req, res) => {
     const { hotelId } = req.query;
@@ -613,10 +639,6 @@ app.put('/api/tickets/:id/status', async (req, res) => {
             const diffMs = now - start;
             const diffMins = Math.max(1, Math.round(diffMs / 60000));
             updateData.resolutionTime = diffMins < 60 ? `${diffMins} min` : `${Math.floor(diffMins / 60)}h ${diffMins % 60}min`;
-        } else if (status === 'Ouvert') {
-            if (ticket.status === 'Résolu' && userRole !== 'admin') {
-                return res.status(403).json({ success: false, message: 'Seul un administrateur peut réouvrir un ticket résolu.' });
-            }
         }
 
         await ticketRef.update(updateData);
@@ -628,7 +650,7 @@ app.put('/api/tickets/:id/status', async (req, res) => {
 
 app.delete('/api/tickets/:id', async (req, res) => {
     const ticketId = req.params.id;
-    const { hotelId, userRole } = req.body;
+    const { hotelId } = req.body;
 
     if (!hotelId) return res.status(400).json({ success: false, message: 'ID hôtel manquant.' });
 
@@ -638,11 +660,6 @@ app.delete('/api/tickets/:id', async (req, res) => {
 
         if (!doc.exists) return res.status(404).json({ success: false, message: 'Ticket introuvable.' });
 
-        const ticket = doc.data();
-        if (ticket.status !== 'Ouvert' && userRole !== 'admin') {
-            return res.status(403).json({ success: false, message: 'Seul un administrateur peut supprimer ce ticket.' });
-        }
-
         await ticketRef.delete();
         return res.json({ success: true, message: 'Ticket supprimé avec succès !' });
     } catch (error) {
@@ -650,9 +667,268 @@ app.delete('/api/tickets/:id', async (req, res) => {
     }
 });
 
+// ==========================================================
+// MIDDLEWARE SÉCURITÉ (SILENCIEUX CÔTÉ NAVIGATEUR - HTTP 200)
+// ==========================================================
+async function verifierPermissionServeur(req, res, next) {
+    const body = req.body || {};
+    const query = req.query || {};
+
+    // 1. Détection flexible de l'identifiant
+    const userIdentifier = body.username || body.userEmail || body.email || query.username || query.userEmail || query.email || query.identifier;
+    const hotelId = body.hotelId || query.hotelId;
+    const frontRole = body.userRole;
+    const requiredRole = body.requiredRole;
+
+    if (!userIdentifier || !hotelId) {
+        return res.json({ 
+            success: false, 
+            code: 400,
+            message: "Paramètres manquants : hotelId et username/email requis." 
+        });
+    }
+
+    try {
+        // 2. Récupération des utilisateurs réels dans Firestore
+        const userDoc = await db.collection("hotels")
+                                .doc(hotelId)
+                                .collection("config")
+                                .doc("users")
+                                .get();
+        
+        if (!userDoc.exists) {
+            return res.json({ success: false, code: 403, message: "Accès refusé." });
+        }
+
+        const configData = userDoc.data();
+        const usersList = Array.isArray(configData.users) ? configData.users : [];
+        const cleanIdentifier = String(userIdentifier).trim().toLowerCase();
+
+        // 3. Identification du User dans Firestore via username ou email
+        const realUser = usersList.find(u => {
+            const uName = (u.username || '').trim().toLowerCase();
+            const uEmail = (u.email || '').trim().toLowerCase();
+            return uName === cleanIdentifier || uEmail === cleanIdentifier;
+        });
+
+        if (!realUser) {
+            return res.json({ success: false, code: 403, message: "Accès refusé." });
+        }
+
+        const realUserRole = (realUser.role || '').trim().toLowerCase();
+
+        // 4. CONTRÔLE SÉCURITÉ ANTI-ALTÉRATION
+        if (frontRole) {
+            const cleanFrontRole = String(frontRole).trim().toLowerCase();
+            if (cleanFrontRole !== realUserRole) {
+                return res.json({ 
+                    success: false, 
+                    code: 403,
+                    message: "Accès refusé." 
+                });
+            }
+        }
+
+        // 5. VÉRIFICATION DYNAMIQUE DE PRIVILÈGES
+        if (requiredRole) {
+            const allowed = Array.isArray(requiredRole) 
+                ? requiredRole.map(r => r.toLowerCase()).includes(realUserRole)
+                : realUserRole === String(requiredRole).toLowerCase();
+
+            if (!allowed) {
+                return res.json({ 
+                    success: false, 
+                    code: 403,
+                    message: "Accès refusé." 
+                });
+            }
+        }
+
+        req.userRole = realUserRole;
+        req.targetHotelId = hotelId;
+        req.currentUserData = realUser;
+        next();
+
+    } catch (error) {
+        console.error("Erreur controle acces:", error);
+        return res.json({ success: false, code: 500, message: "Une erreur est survenue." });
+    }
+}
+
 // ==========================================
-// DÉMARRAGE DU SERVEUR
+// GESTION CONFIGURATION DYNAMIQUE
 // ==========================================
+app.get('/api/admin/config/:configDoc', verifierPermissionServeur, async (req, res) => {
+    const { configDoc } = req.params;
+    const hotelId = req.targetHotelId || req.query.hotelId;
+
+    if (!hotelId) {
+        return res.status(400).json({ success: false, message: "ID hôtel manquant." });
+    }
+
+    try {
+        const docSnap = await db.collection("hotels")
+            .doc(hotelId)
+            .collection("config")
+            .doc(configDoc)
+            .get();
+
+        if (!docSnap.exists) {
+            return res.json({ success: true, [configDoc]: [] });
+        }
+
+        return res.json({ success: true, ...docSnap.data() });
+    } catch (err) {
+        console.error(`Erreur GET config/${configDoc}:`, err);
+        return res.status(500).json({ success: false, message: "Erreur lors de la récupération." });
+    }
+});
+
+app.post('/api/admin/config/:configDoc', verifierPermissionServeur, async (req, res) => {
+    const { configDoc } = req.params;
+    const hotelId = req.targetHotelId || req.body.hotelId;
+
+    if (!hotelId) {
+        return res.status(400).json({ success: false, message: "ID hôtel manquant." });
+    }
+
+    try {
+        const payload = {
+            ...req.body,
+            hotelId: hotelId,
+            updatedAt: new Date().toISOString()
+        };
+
+        await db.collection("hotels")
+            .doc(hotelId)
+            .collection("config")
+            .doc(configDoc)
+            .set(payload, { merge: true });
+
+        return res.json({ success: true, message: `Configuration ${configDoc} sauvegardée.` });
+    } catch (err) {
+        console.error(`Erreur POST config/${configDoc}:`, err);
+        return res.status(500).json({ success: false, message: "Erreur lors de la sauvegarde." });
+    }
+});
+
+// ==========================================
+// ROUTE GÉNÉRIQUE EXÉCUTION ACTIONS DB
+// ==========================================
+app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) => {
+    const { action, collectionName, docId, dataPayload } = req.body;
+    const hotelId = req.targetHotelId || req.body.hotelId;
+
+    // Action personnalisée : Récupération des métadonnées pour export PDF/Excel
+    if (action === 'GET_EXPORT_METADATA') {
+        try {
+            let hotelName = null;
+            if (hotelId) {
+                const hotelDoc = await db.collection('hotels').doc(hotelId).get();
+                if (hotelDoc.exists) {
+                    hotelName = hotelDoc.data().name || null;
+                }
+            }
+
+            const rawUser = req.currentUserData || {};
+            return res.json({
+                success: true,
+                data: {
+                    hotelName,
+                    fullName: rawUser.fullName || rawUser.displayName || rawUser.name || null,
+                    email: rawUser.email || rawUser.username || null,
+                    department: rawUser.department || null
+                }
+            });
+        } catch (err) {
+            console.error("Erreur GET_EXPORT_METADATA:", err);
+            return res.status(500).json({ success: false, message: "Erreur récupération métadonnées." });
+        }
+    }
+
+    if (!action || !collectionName || !docId || !hotelId) {
+        return res.status(400).json({ success: false, message: "Champs action, collectionName, docId et hotelId requis." });
+    }
+
+    try {
+        const docRef = db.collection("hotels").doc(hotelId).collection(collectionName).doc(docId);
+
+        if (action === 'DELETE') {
+            await docRef.delete();
+            return res.json({ success: true, message: "Suppression effectuée avec succès." });
+        } 
+        else if (action === 'UPDATE') {
+            await docRef.set(dataPayload || {}, { merge: true });
+            return res.json({ success: true, message: "Mise à jour effectuée avec succès." });
+        }
+        else if (action === 'CREATE') {
+            await docRef.set(dataPayload || {});
+            return res.json({ success: true, message: "Création effectuée avec succès." });
+        }
+
+        return res.status(400).json({ success: false, message: "Action non reconnue." });
+    } catch (err) {
+        console.error("Erreur execute-db-action:", err);
+        return res.status(500).json({ success: false, message: "Erreur serveur lors de l'opération." });
+    }
+});
+// Récupérer les informations d'un hôtel par son ID
+app.get('/api/hotels/:id', async (req, res) => {
+    try {
+        const doc = await db.collection('hotels').doc(req.params.id).get();
+        if (!doc.exists) {
+            return res.status(404).json({ message: "Hôtel introuvable" });
+        }
+        res.json({ id: doc.id, ...doc.data() });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// ==========================================
+// MISE À JOUR DU PREMIER MOT DE PASSE (Compatible config/users)
+// ==========================================
+app.post('/api/admin/users/update-first-login-password', async (req, res) => {
+    try {
+        const { hotelId, userId, newPassword } = req.body;
+
+        if (!hotelId || !userId || !newPassword) {
+            return res.status(400).json({ success: false, message: "Données manquantes." });
+        }
+
+        const configDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('users');
+        const docSnap = await configDocRef.get();
+
+        if (!docSnap.exists) {
+            return res.status(404).json({ success: false, message: "Dossier utilisateurs introuvable." });
+        }
+
+        let users = docSnap.data().users || [];
+        const index = users.findIndex(u => u.id === userId);
+
+        if (index === -1) {
+            return res.status(404).json({ success: false, message: "Utilisateur introuvable." });
+        }
+
+        // Hachage du nouveau mot de passe avec bcrypt pour la sécurité
+        const hashedPassword = await bcrypt.hash(newPassword.trim(), 10);
+
+        users[index] = {
+            ...users[index],
+            password: hashedPassword,
+            passwordHash: hashedPassword,
+            isFirstLogin: false, // On désactive le blocage
+            updatedAt: new Date().toISOString()
+        };
+
+        await configDocRef.update({ users, updatedAt: new Date().toISOString() });
+
+        return res.json({ success: true, message: "Mot de passe mis à jour avec succès." });
+
+    } catch (error) {
+        console.error("Erreur lors de la mise à jour du premier mot de passe:", error);
+        return res.status(500).json({ success: false, message: "Erreur serveur interne." });
+    }
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 Serveur API Room Check démarré sur le port ${PORT}`);
