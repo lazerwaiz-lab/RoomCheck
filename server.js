@@ -811,6 +811,58 @@ app.post('/api/admin/config/:configDoc', verifierPermissionServeur, async (req, 
         return res.status(500).json({ success: false, message: "Erreur lors de la sauvegarde." });
     }
 });
+// ==========================================
+// ROUTE EXPLICITE POUR LES DÉPARTEMENTS
+// ==========================================
+app.get('/api/admin/config/departement', verifierPermissionServeur, async (req, res) => {
+    const hotelId = req.targetHotelId || req.query.hotelId;
+    if (!hotelId) {
+        return res.status(400).json({ success: false, message: "ID hôtel manquant." });
+    }
+
+    try {
+        const docSnap = await db.collection("hotels")
+            .doc(hotelId)
+            .collection("config")
+            .doc("departement") // Assure-toi que le nom du doc correspond dans Firestore
+            .get();
+
+        if (!docSnap.exists) {
+            return res.json({ success: true, departement: [] });
+        }
+
+        return res.json({ success: true, ...docSnap.data() });
+    } catch (err) {
+        console.error("Erreur GET config/departement:", err);
+        return res.status(500).json({ success: false, message: "Erreur lors de la récupération." });
+    }
+});
+
+app.post('/api/admin/config/departement', verifierPermissionServeur, async (req, res) => {
+    const hotelId = req.targetHotelId || req.body.hotelId;
+    if (!hotelId) {
+        return res.status(400).json({ success: false, message: "ID hôtel manquant." });
+    }
+
+    try {
+        const payload = {
+            ...req.body,
+            hotelId: hotelId,
+            updatedAt: new Date().toISOString()
+        };
+
+        await db.collection("hotels")
+            .doc(hotelId)
+            .collection("config")
+            .doc("departement")
+            .set(payload, { merge: true });
+
+        return res.json({ success: true, message: "Configuration départements sauvegardée." });
+    } catch (err) {
+        console.error("Erreur POST config/departement:", err);
+        return res.status(500).json({ success: false, message: "Erreur lors de la sauvegarde." });
+    }
+});
 
 // ==========================================
 // ROUTE GÉNÉRIQUE EXÉCUTION ACTIONS DB
