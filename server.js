@@ -43,7 +43,7 @@ app.use(cors({
 app.use(express.json({ limit: '2mb' }));
 
 // 3. Sert tous les fichiers HTML/JS/CSS à la racine de room-checker-service
-app.use(express.static(__dirname));
+//app.use(express.static(__dirname));
 
 // 4. Route d'accueil
 app.get('/', (req, res) => {
