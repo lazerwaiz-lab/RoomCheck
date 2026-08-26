@@ -15,10 +15,10 @@ async function executeDbAction(action, collectionName, docId, dataPayload = {}, 
         return { success: false, message: "Session invalide" };
     }
 
-    // Détection de l'environnement : port 3000 en local, URL relative en production
-    const baseUrl = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-        ? 'http://127.0.0.1:3000'
-        : '';
+    // Détection de l'environnement : local vs production Render
+const baseUrl = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+    ? 'http://127.0.0.1:3000'
+    : 'https://roomcheck-a24u.onrender.com';
 
     try {
         // 2. Envoi de la demande au serveur Node.js
