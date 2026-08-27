@@ -1,5 +1,6 @@
 // Fichier api.js - Utilisé par toutes tes pages front-end
 console.log = console.error = console.warn = console.info = () => {};
+
 async function executeDbAction(action, collectionName, docId, dataPayload = {}, requiredRole = null) {
     // 1. Récupération automatique de la session locale
     const currentUser = JSON.parse(sessionStorage.getItem('currentUser') || '{}');
@@ -7,18 +8,29 @@ async function executeDbAction(action, collectionName, docId, dataPayload = {}, 
 
     const userEmail = currentUser.username || currentUser.email;
     const hotelId = currentHotel.id;
-    // On prend le rôle affiché/déclaré par le front-end pour vérification BDD
-    const frontRole = requiredRole || currentUser.role;
+
+    // --- GESTION DES RÔLES MULTIPLES ---
+    let rawRole = requiredRole || currentUser.role || currentUser.roles || '';
+    let frontRole = rawRole;
+
+    if (Array.isArray(rawRole)) {
+        frontRole = rawRole.join(', ');
+    }
+    // -----------------------------------
 
     if (!userEmail || !hotelId) {
         window.location.href = 'index.html';
         return { success: false, message: "Session invalide" };
     }
 
-    // Détection de l'environnement : local vs production Render
-const baseUrl = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-    ? 'http://127.0.0.1:3000'
-    : 'https://roomcheck-a24u.onrender.com';
+    // Détection robuste : si on est en local (localhost, 127.0.0.1, ou port Live Preview type 3001/5500)
+    const isLocal = window.location.hostname === 'localhost' || 
+                    window.location.hostname === '127.0.0.1' || 
+                    window.location.hostname === '';
+
+    const baseUrl = isLocal
+        ? 'http://127.0.0.1:3000'
+        : 'https://roomcheck-a24u.onrender.com';
 
     try {
         // 2. Envoi de la demande au serveur Node.js
@@ -30,7 +42,7 @@ const baseUrl = (window.location.hostname === 'localhost' || window.location.hos
             body: JSON.stringify({
                 userEmail: userEmail,
                 hotelId: hotelId,
-                userRole: frontRole,       // Transmet le rôle que le Front prétend avoir ou exige
+                userRole: frontRole,       // Transmet les rôles multiples proprement
                 action: action,            // 'CREATE', 'UPDATE', ou 'DELETE'
                 collectionName: collectionName, // Ex: 'tickets', 'rooms', etc.
                 docId: docId,              // ID du document ciblé

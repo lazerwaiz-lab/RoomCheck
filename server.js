@@ -34,8 +34,8 @@ app.use(cors({
             callback(new Error('Accès bloqué par la politique CORS'));
         }
     },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // OPTIONS est obligatoire pour les requêtes preflight
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-user-id'], // <-- AJOUTE 'x-user-id' ICI !
     credentials: true
 }));
 
@@ -715,12 +715,30 @@ async function verifierPermissionServeur(req, res, next) {
             return res.json({ success: false, code: 403, message: "Accès refusé." });
         }
 
-        const realUserRole = (realUser.role || '').trim().toLowerCase();
+        // --- GESTION MULTI-RÔLES EN BDD ---
+        // On récupère le champ 'role' (qui peut être "Housekeeping, Reception") ou un tableau 'roles'
+        const rawRoleFromDb = realUser.role || realUser.roles || '';
+        
+        // On transforme systématiquement en un tableau propre de rôles en minuscules
+        let realUserRolesList = [];
+        if (typeof rawRoleFromDb === 'string') {
+            realUserRolesList = rawRoleFromDb.split(',').map(r => r.trim().toLowerCase()).filter(r => r.length > 0);
+        } else if (Array.isArray(rawRoleFromDb)) {
+            realUserRolesList = rawRoleFromDb.map(r => String(r).trim().toLowerCase()).filter(r => r.length > 0);
+        }
 
-        // 4. CONTRÔLE SÉCURITÉ ANTI-ALTÉRATION
+        // Pour compatibilité si le reste du code a besoin d'une chaîne principale
+        const realUserRole = realUserRolesList.join(', ');
+
+        // 4. CONTRÔLE SÉCURITÉ ANTI-ALTÉRATION (Support multi-rôles front)
         if (frontRole) {
-            const cleanFrontRole = String(frontRole).trim().toLowerCase();
-            if (cleanFrontRole !== realUserRole) {
+            // On découpe aussi le rôle envoyé par le front au cas où il contiendrait des virgules
+            const frontRolesList = String(frontRole).split(',').map(r => r.trim().toLowerCase()).filter(r => r.length > 0);
+            
+            // On vérifie que tous les rôles revendiqués par le front font bien partie des rôles réels de l'utilisateur en BDD
+            const isFrontRoleValid = frontRolesList.every(fRole => realUserRolesList.includes(fRole));
+
+            if (!isFrontRoleValid) {
                 return res.json({ 
                     success: false, 
                     code: 403,
@@ -729,11 +747,15 @@ async function verifierPermissionServeur(req, res, next) {
             }
         }
 
-        // 5. VÉRIFICATION DYNAMIQUE DE PRIVILÈGES
+        // 5. VÉRIFICATION DYNAMIQUE DE PRIVILÈGES (Multi-rôles supporté)
         if (requiredRole) {
-            const allowed = Array.isArray(requiredRole) 
-                ? requiredRole.map(r => r.toLowerCase()).includes(realUserRole)
-                : realUserRole === String(requiredRole).toLowerCase();
+            // Le rôle requis peut être un tableau ou une chaîne unique
+            const requiredArray = Array.isArray(requiredRole) 
+                ? requiredRole.map(r => String(r).trim().toLowerCase()) 
+                : [String(requiredRole).trim().toLowerCase()];
+
+            // On regarde si l'utilisateur possède AU MOINS l'un des rôles requis
+            const allowed = requiredArray.some(reqR => realUserRolesList.includes(reqR));
 
             if (!allowed) {
                 return res.json({ 
@@ -979,6 +1001,74 @@ app.post('/api/admin/users/update-first-login-password', async (req, res) => {
     } catch (error) {
         console.error("Erreur lors de la mise à jour du premier mot de passe:", error);
         return res.status(500).json({ success: false, message: "Erreur serveur interne." });
+    }
+});
+// Route Express pour récupérer les réservations d'un hôtel de manière sécurisée
+app.get('/api/hotels/:hotelId/bookings', async (req, res) => {
+    try {
+        const { hotelId } = req.params;
+        const userId = req.headers['x-user-id'];
+
+        // Optionnel : Vérification de sécurité avec le userId si nécessaire
+        if (!userId) {
+            return res.status(401).json({ error: "Utilisateur non authentifié." });
+        }
+
+        // Récupération dynamique depuis la sous-collection Firestore
+        const bookingsRef = db.collection('hotels').doc(hotelId).collection('bookings');
+        const snapshot = await bookingsRef.get();
+
+        const bookings = [];
+        const batch = db.batch(); // Permet de grouper les modifications Firestore pour optimiser
+        let hasChanges = false;
+        const now = new Date(); // Heure actuelle du serveur
+
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            let currentStatus = data.status || 'RÉSERVÉE';
+            let calculatedStatus = currentStatus;
+
+            // On s'assure d'avoir les dates de check-in et check-out valides
+            const checkIn = data.checkIn ? new Date(data.checkIn) : null;
+            const checkOut = data.checkOut ? new Date(data.checkOut) : null;
+
+            if (checkIn && checkOut && !isNaN(checkIn) && !isNaN(checkOut)) {
+                // Logique intelligente d'évolution du statut en fonction du temps
+                if (now > checkOut) {
+                    calculatedStatus = 'TERMINÉE';
+                } else if (now >= checkIn && now <= checkOut) {
+                    calculatedStatus = 'OCCUPÉE';
+                } else if (now < checkIn) {
+                    // Si on est avant la date de check-in, on garde 'RÉSERVÉE' 
+                    // (sauf si un autre statut manuel spécifique existe)
+                    if (currentStatus !== 'ANNULÉE') {
+                        calculatedStatus = 'RÉSERVÉE';
+                    }
+                }
+
+                // Si le statut calculé diffère de celui enregistré dans Firestore, on met à jour
+                if (calculatedStatus !== currentStatus) {
+                    hasChanges = true;
+                    batch.update(doc.ref, { status: calculatedStatus });
+                    data.status = calculatedStatus; // Met à jour l'objet renvoyé immédiatement
+                }
+            }
+
+            bookings.push({
+                id: doc.id,
+                ...data
+            });
+        });
+
+        // Si des statuts ont évolué avec le temps, on valide les modifications dans Firestore
+        if (hasChanges) {
+            await batch.commit();
+        }
+
+        res.status(200).json(bookings);
+    } catch (error) {
+        console.error("Erreur serveur lors de la récupération des bookings:", error);
+        res.status(500).json({ error: "Erreur interne du serveur." });
     }
 });
 const PORT = process.env.PORT || 3000;
