@@ -1,5 +1,5 @@
 // Fichier api.js - Utilisé par toutes tes pages front-end
-console.log = console.error = console.warn = console.info = () => {};
+
 
 async function executeDbAction(action, collectionName, docId, dataPayload = {}, requiredRole = null) {
     // 1. Récupération automatique de la session locale

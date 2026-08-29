@@ -501,6 +501,48 @@ app.post('/api/admin/config/users', async (req, res) => {
     }
 });
 
+app.patch('/api/admin/config/user-update', async (req, res) => {
+    try {
+        const { hotelId, userId, updateData } = req.body;
+
+        if (!hotelId || !userId || !updateData) {
+            return res.status(400).json({ error: 'Données invalides pour la mise à jour.' });
+        }
+
+        const docRef = db.collection('hotels').doc(hotelId).collection('config').doc('users');
+        const docSnap = await docRef.get();
+        
+        if (!docSnap.exists) {
+            return res.status(404).json({ error: 'Document utilisateurs introuvable.' });
+        }
+
+        let users = docSnap.data().users || [];
+        const userIndex = users.findIndex(u => u.id === userId);
+
+        if (userIndex === -1) {
+            return res.status(404).json({ error: 'Utilisateur introuvable dans la liste.' });
+        }
+
+        // On met à jour uniquement les champs envoyés, en conservant son mot de passe et ses données d'origine intactes
+        users[userIndex] = {
+            ...users[userIndex],
+            ...updateData,
+            updatedAt: new Date().toISOString()
+        };
+
+        await docRef.set({
+            hotelId,
+            users: users,
+            updatedAt: new Date().toISOString()
+        });
+
+        res.json({ message: 'Utilisateur mis à jour avec succès', users: users });
+    } catch (error) {
+        console.error("Erreur mise à jour utilisateur unique:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // ==========================================
 // 4. AUTRES CONFIGURATIONS
 // ==========================================
@@ -920,24 +962,75 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
         }
     }
 
-    if (!action || !collectionName || !docId || !hotelId) {
-        return res.status(400).json({ success: false, message: "Champs action, collectionName, docId et hotelId requis." });
+    // Action personnalisée : Mise à jour d'un seul utilisateur sans impacter son mot de passe
+    if (collectionName === 'config' && docId === 'users' && action === 'UPDATE_SINGLE_USER') {
+        try {
+            const { userId, updateData } = dataPayload || {};
+            
+            const docRef = db.collection('hotels').doc(hotelId).collection('config').doc('users');
+            const docSnap = await docRef.get();
+            
+            if (!docSnap.exists) {
+                return res.json({ success: false, message: 'Document utilisateurs introuvable.' });
+            }
+
+            let users = docSnap.data().users || [];
+            const userIndex = users.findIndex(u => u.id === userId);
+
+            if (userIndex === -1) {
+                return res.json({ success: false, message: 'Utilisateur introuvable dans la liste.' });
+            }
+
+            // On fusionne les nouvelles modifications tout en préservant son mot de passe existant
+            users[userIndex] = {
+                ...users[userIndex],
+                ...updateData,
+                updatedAt: new Date().toISOString()
+            };
+
+            await docRef.set({
+                hotelId,
+                users: users,
+                updatedAt: new Date().toISOString()
+            });
+
+            return res.json({ success: true, users: users });
+        } catch (err) {
+            console.error("Erreur UPDATE_SINGLE_USER:", err);
+            return res.status(500).json({ success: false, message: "Erreur serveur lors de la mise à jour de l'utilisateur." });
+        }
+    }
+
+    // On retire docId des vérifications obligatoires initiales
+    if (!action || !collectionName || !hotelId) {
+        return res.status(400).json({ success: false, message: "Champs action, collectionName et hotelId requis." });
+    }
+
+    // Le docId reste obligatoire uniquement pour UPDATE et DELETE
+    if ((action === 'UPDATE' || action === 'DELETE') && !docId) {
+        return res.status(400).json({ success: false, message: "docId requis pour cette action." });
     }
 
     try {
-        const docRef = db.collection("hotels").doc(hotelId).collection(collectionName).doc(docId);
+        const collectionRef = db.collection("hotels").doc(hotelId).collection(collectionName);
 
         if (action === 'DELETE') {
-            await docRef.delete();
+            await collectionRef.doc(docId).delete();
             return res.json({ success: true, message: "Suppression effectuée avec succès." });
         } 
         else if (action === 'UPDATE') {
-            await docRef.set(dataPayload || {}, { merge: true });
+            await collectionRef.doc(docId).set(dataPayload || {}, { merge: true });
             return res.json({ success: true, message: "Mise à jour effectuée avec succès." });
         }
         else if (action === 'CREATE') {
-            await docRef.set(dataPayload || {});
-            return res.json({ success: true, message: "Création effectuée avec succès." });
+            // Génération d'un ID personnalisé basé sur la date et l'heure précise
+            const now = new Date();
+            const timestamp = now.toISOString().replace(/[:.]/g, '-');
+            const customDocId = `ticket_${timestamp}`;
+
+            // On enregistre le document avec ton ID personnalisé
+            await collectionRef.doc(customDocId).set(dataPayload || {});
+            return res.json({ success: true, message: "Création effectuée avec succès.", docId: customDocId });
         }
 
         return res.status(400).json({ success: false, message: "Action non reconnue." });
