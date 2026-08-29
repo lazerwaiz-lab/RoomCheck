@@ -1056,9 +1056,9 @@ app.get('/api/hotels/:id', async (req, res) => {
 // ==========================================
 app.post('/api/admin/users/update-first-login-password', async (req, res) => {
     try {
-        const { hotelId, userId, newPassword } = req.body;
+        const { hotelId, userId, oldPassword, newPassword } = req.body;
 
-        if (!hotelId || !userId || !newPassword) {
+        if (!hotelId || !userId || !oldPassword || !newPassword) {
             return res.status(400).json({ success: false, message: "Données manquantes." });
         }
 
@@ -1076,14 +1076,35 @@ app.post('/api/admin/users/update-first-login-password', async (req, res) => {
             return res.status(404).json({ success: false, message: "Utilisateur introuvable." });
         }
 
-        // Hachage du nouveau mot de passe avec bcrypt pour la sécurité
+        const targetUser = users[index];
+        const pwdToCompare = targetUser.password || targetUser.passwordHash || '';
+
+        // 🛡️ Vérification sécurisée de l'ancien mot de passe via bcrypt
+        let isOldPasswordValid = false;
+        if (typeof bcrypt !== 'undefined' && bcrypt.compareSync) {
+            isOldPasswordValid = bcrypt.compareSync(oldPassword, pwdToCompare);
+        } else {
+            isOldPasswordValid = (oldPassword === pwdToCompare);
+        }
+
+        if (!isOldPasswordValid) {
+            return res.status(400).json({ success: false, message: "L'ancien mot de passe est incorrect." });
+        }
+
+        // 🛑 Empêcher l'utilisateur de remettre exactement le même mot de passe
+        if (oldPassword === newPassword.trim()) {
+            return res.status(400).json({ success: false, message: "Le nouveau mot de passe doit être différent de l'ancien." });
+        }
+
+        // Hachage sécurisé du nouveau mot de passe
         const hashedPassword = await bcrypt.hash(newPassword.trim(), 10);
 
         users[index] = {
             ...users[index],
             password: hashedPassword,
             passwordHash: hashedPassword,
-            isFirstLogin: false, // On désactive le blocage
+            isFirstLogin: false,
+            passwordUpdatedAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
         };
 
@@ -1092,7 +1113,8 @@ app.post('/api/admin/users/update-first-login-password', async (req, res) => {
         return res.json({ success: true, message: "Mot de passe mis à jour avec succès." });
 
     } catch (error) {
-        console.error("Erreur lors de la mise à jour du premier mot de passe:", error);
+        // 🔒 Log neutre pour ne laisser aucune trace exploitable par un hacker
+        console.error("Erreur de sécurité lors du traitement du mot de passe.");
         return res.status(500).json({ success: false, message: "Erreur serveur interne." });
     }
 });
