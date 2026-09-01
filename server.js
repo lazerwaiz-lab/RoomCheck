@@ -43,7 +43,7 @@ app.use(cors({
 app.use(express.json({ limit: '2mb' }));
 
 // 3. Sert tous les fichiers HTML/JS/CSS à la racine de room-checker-service
-//app.use(express.static(__dirname));
+app.use(express.static(__dirname));
 
 // 4. Route d'accueil
 app.get('/', (req, res) => {
@@ -408,16 +408,45 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
 
         users[index].password = hashedPassword;
         users[index].passwordHash = hashedPassword;
-        users[index].isFirstLogin = true; // <--- AJOUTE CETTE LIGNE ICI POUR FORCER LE CHANGEMENT AU PROCHAIN LOGIN
+        users[index].isFirstLogin = true; // Force le changement au prochain login
         users[index].updatedAt = new Date().toISOString();
 
         await configDocRef.update({ users, updatedAt: new Date().toISOString() });
+
+        // 🧹 SUPPRESSION DE LA NOTIFICATION ASSOCIÉE
+        const reqDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('passwordRequests');
+        const reqDocSnap = await reqDocRef.get();
+        if (reqDocSnap.exists) {
+            let requests = reqDocSnap.data().requests || [];
+            requests = requests.filter(r => r.userId !== targetUserId);
+            await reqDocRef.set({ requests, updatedAt: new Date().toISOString() });
+        }
+
         return res.json({ success: true, message: 'Mot de passe réinitialisé avec succès !' });
     } catch (error) {
+        console.error("Erreur reset-password:", error);
         return res.json({ success: false, message: 'Une erreur serveur est survenue.' });
     }
 });
 
+app.get('/api/hotels/:hotelId/password-requests', async (req, res) => {
+    try {
+        const { hotelId } = req.params;
+        
+        const reqDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('passwordRequests');
+        const reqDocSnap = await reqDocRef.get();
+
+        if (!reqDocSnap.exists) {
+            return res.status(200).json([]);
+        }
+
+        const requests = reqDocSnap.data().requests || [];
+        return res.status(200).json(requests);
+    } catch (error) {
+        console.error("Erreur récupération password-requests:", error);
+        return res.status(500).json({ error: "Erreur serveur" });
+    }
+});
 app.delete('/api/admin/users/:id', async (req, res) => {
     const userId = req.params.id;
     const { hotelId } = req.body;
@@ -709,6 +738,107 @@ app.delete('/api/tickets/:id', async (req, res) => {
     }
 });
 
+// --- ROUTE PUBLIQUE (Sans middleware de sécurité) ---
+app.post('/api/public-action', async (req, res) => {
+    const { action, dataPayload } = req.body;
+
+    // Action : Récupération du nom de l'utilisateur
+    if (action === 'GET_USER_NAME') {
+        try {
+            const identifier = dataPayload?.identifier?.trim().toLowerCase();
+            const hotelsSnapshot = await db.collection('hotels').get();
+            let foundFullName = null;
+
+            for (const hotelDoc of hotelsSnapshot.docs) {
+                const userDocSnap = await db.collection('hotels').doc(hotelDoc.id).collection('config').doc('users').get();
+                if (userDocSnap.exists) {
+                    const data = userDocSnap.data();
+                    const usersList = Array.isArray(data.users) ? data.users : Object.values(data);
+                    const matchedUser = usersList.find(u => 
+                        u && typeof u === 'object' && (
+                            (u.email && u.email.trim().toLowerCase() === identifier) || 
+                            (u.username && u.username.trim().toLowerCase() === identifier)
+                        )
+                    );
+                    if (matchedUser) {
+                        foundFullName = matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim();
+                        break;
+                    }
+                }
+            }
+
+            if (foundFullName) {
+                return res.json({ success: true, fullName: foundFullName });
+            } else {
+                return res.json({ success: false, message: "Utilisateur non trouvé" });
+            }
+        } catch (err) {
+            console.error("Erreur Firestore GET_USER_NAME:", err);
+            return res.status(500).json({ success: false, message: "Erreur serveur" });
+        }
+    }
+
+    // Action : Demande de réinitialisation de mot de passe
+    if (action === 'REQUEST_PASSWORD_RESET') {
+        try {
+            const identifier = dataPayload?.identifier?.trim().toLowerCase();
+            if (!identifier) {
+                return res.json({ success: false, message: "Identifiant manquant." });
+            }
+
+            const hotelsSnapshot = await db.collection('hotels').get();
+            let targetHotelId = null;
+            let matchedUser = null;
+
+            for (const hotelDoc of hotelsSnapshot.docs) {
+                const userDocSnap = await db.collection('hotels').doc(hotelDoc.id).collection('config').doc('users').get();
+                if (userDocSnap.exists) {
+                    const data = userDocSnap.data();
+                    const usersList = Array.isArray(data.users) ? data.users : Object.values(data);
+                    
+                    matchedUser = usersList.find(u => 
+                        u && typeof u === 'object' && (
+                            (u.email && u.email.trim().toLowerCase() === identifier) || 
+                            (u.username && u.username.trim().toLowerCase() === identifier)
+                        )
+                    );
+
+                    if (matchedUser) {
+                        targetHotelId = hotelDoc.id;
+                        break;
+                    }
+                }
+            }
+
+            if (!matchedUser || !targetHotelId) {
+                return res.json({ success: true, message: "Demande prise en compte." });
+            }
+
+            const reqDocRef = db.collection('hotels').doc(targetHotelId).collection('config').doc('passwordRequests');
+            const reqDocSnap = await reqDocRef.get();
+            let requests = reqDocSnap.exists ? (reqDocSnap.data().requests || []) : [];
+
+            const existingIndex = requests.findIndex(r => r.userId === matchedUser.id);
+            if (existingIndex === -1) {
+                requests.push({
+                    userId: matchedUser.id,
+                    fullName: matchedUser.fullName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim(),
+                    identifier: matchedUser.username || matchedUser.email,
+                    createdAt: new Date().toISOString()
+                });
+                await reqDocRef.set({ requests, updatedAt: new Date().toISOString() });
+            }
+
+            return res.json({ success: true, message: "Demande envoyée à l'administration." });
+        } catch (err) {
+            console.error("Erreur REQUEST_PASSWORD_RESET:", err);
+            return res.status(500).json({ success: false, message: "Erreur serveur" });
+        }
+    }
+
+    return res.status(400).json({ success: false, message: "Action publique non reconnue." });
+});
+
 // ==========================================================
 // MIDDLEWARE SÉCURITÉ (SILENCIEUX CÔTÉ NAVIGATEUR - HTTP 200)
 // ==========================================================
@@ -934,6 +1064,22 @@ app.post('/api/admin/config/departement', verifierPermissionServeur, async (req,
 app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) => {
     const { action, collectionName, docId, dataPayload } = req.body;
     const hotelId = req.targetHotelId || req.body.hotelId;
+
+    // --- ACTION : Récupérer les demandes de réinitialisation de mot de passe (Côté Admin) ---
+    if (action === 'GET_PASSWORD_REQUESTS') {
+        try {
+            if (!hotelId) {
+                return res.json({ success: false, message: "ID de l'hôtel manquant." });
+            }
+            const reqDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('passwordRequests');
+            const reqDocSnap = await reqDocRef.get();
+            const requests = reqDocSnap.exists ? (reqDocSnap.data().requests || []) : [];
+            return res.json({ success: true, requests });
+        } catch (err) {
+            console.error("Erreur GET_PASSWORD_REQUESTS:", err);
+            return res.status(500).json({ success: false, message: "Erreur serveur" });
+        }
+    }
 
     // Action personnalisée : Récupération des métadonnées pour export PDF/Excel
     if (action === 'GET_EXPORT_METADATA') {

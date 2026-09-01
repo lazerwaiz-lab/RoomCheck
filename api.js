@@ -2,12 +2,15 @@
 
 
 async function executeDbAction(action, collectionName, docId, dataPayload = {}, requiredRole = null) {
-    // 1. Récupération automatique de la session locale
+    // 1. Autoriser explicitement l'action publique sans session active
+    const isPublicAction = (action === 'GET_USER_NAME');
+
+    // 2. Récupération automatique de la session locale
     const currentUser = JSON.parse(sessionStorage.getItem('currentUser') || '{}');
     const currentHotel = JSON.parse(sessionStorage.getItem('currentHotel') || '{}');
 
-    const userEmail = currentUser.username || currentUser.email;
-    const hotelId = currentHotel.id;
+    const userEmail = currentUser.username || currentUser.email || (isPublicAction ? 'public@roomcheck.local' : '');
+    const hotelId = currentHotel.id || (isPublicAction ? 'public' : '');
 
     // --- GESTION DES RÔLES MULTIPLES ---
     let rawRole = requiredRole || currentUser.role || currentUser.roles || '';
@@ -18,7 +21,8 @@ async function executeDbAction(action, collectionName, docId, dataPayload = {}, 
     }
     // -----------------------------------
 
-    if (!userEmail || !hotelId) {
+    // Si ce n'est PAS une action publique et qu'il manque des infos de session, on bloque
+    if (!isPublicAction && (!userEmail || !hotelId)) {
         window.location.href = 'index.html';
         return { success: false, message: "Session invalide" };
     }
@@ -33,7 +37,7 @@ async function executeDbAction(action, collectionName, docId, dataPayload = {}, 
         : 'https://roomcheck-a24u.onrender.com';
 
     try {
-        // 2. Envoi de la demande au serveur Node.js
+        // 3. Envoi de la demande au serveur Node.js
         const response = await fetch(`${baseUrl}/api/execute-db-action`, {
             method: 'POST',
             headers: {
@@ -43,7 +47,7 @@ async function executeDbAction(action, collectionName, docId, dataPayload = {}, 
                 userEmail: userEmail,
                 hotelId: hotelId,
                 userRole: frontRole,       // Transmet les rôles multiples proprement
-                action: action,            // 'CREATE', 'UPDATE', ou 'DELETE'
+                action: action,            // 'CREATE', 'UPDATE', 'DELETE', ou 'GET_USER_NAME'
                 collectionName: collectionName, // Ex: 'tickets', 'rooms', etc.
                 docId: docId,              // ID du document ciblé
                 dataPayload: dataPayload   // Données à modifier/créer
