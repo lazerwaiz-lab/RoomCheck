@@ -34,7 +34,7 @@ window.executeDbAction = async function executeDbAction(action, collectionName, 
 
     const baseUrl = isLocal
         ? 'http://127.0.0.1:3000'
-        : 'https://roomcheck-a24u.onrender.com';
+        : 'https://friday-deleted-finish-inherited.trycloudflare.com';
 
     try {
         // 3. Choix dynamique de l'URL et du corps de la requête selon l'action
