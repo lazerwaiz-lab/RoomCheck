@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
+const fs = require('fs'); // <--- 1. Ajoute fs ici
 const path = require('path');
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
@@ -16,6 +17,45 @@ if (getApps().length === 0) {
 const db = getFirestore();
 const app = express();
 
+// ==========================================
+// 🌟 2. SYSTÈMES DE MIROIR LOCAL (RC-LOCALDATA)
+// ==========================================
+const LOCAL_DATA_ROOT = path.join(__dirname, 'RC-LOCALDATA');
+
+function saveToLocalMirror(hotelId, collectionName, docId, data) {
+    if (!hotelId || !collectionName) return;
+    const dirPath = path.join(LOCAL_DATA_ROOT, 'hotels', hotelId, collectionName);
+    if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
+    }
+    const fileName = docId ? `${docId}.json` : `_collection.json`;
+    const filePath = path.join(dirPath, fileName);
+    
+    let fileData = {};
+    if (fs.existsSync(filePath)) {
+        try { fileData = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (e) { fileData = {}; }
+    }
+    if (docId) {
+        fileData = { ...fileData, ...data, id: docId, localUpdatedAt: new Date().toISOString() };
+    } else {
+        fileData = data;
+    }
+    fs.writeFileSync(filePath, JSON.stringify(fileData, null, 2), 'utf8');
+}
+
+function readFromLocalMirror(hotelId, collectionName, docId) {
+    try {
+        const filePath = path.join(LOCAL_DATA_ROOT, 'hotels', hotelId, collectionName, docId ? `${docId}.json` : `_collection.json`);
+        if (fs.existsSync(filePath)) {
+            return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        }
+    } catch (e) {
+        console.error("Erreur lecture RC-LOCALDATA:", e);
+    }
+    return null;
+}
+// ==========================================
+
 // 1. Configuration CORS
 const allowedOrigins = [
     'http://localhost:3000',
@@ -23,8 +63,7 @@ const allowedOrigins = [
     'http://localhost:3001',
     'http://127.0.0.1:3001',
     'https://roomcheck.centillion.online',
-    'https://roomcheck-a24u.onrender.com',
-    'http://localhost:3001'
+    'https://roomcheck-a24u.onrender.com'
 ];
 
 app.use(cors({
@@ -36,17 +75,13 @@ app.use(cors({
         }
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-user-id'], // <-- AJOUTE 'x-user-id' ICI !
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-user-id'],
     credentials: true
 }));
 
-// 2. Limite des requêtes JSON (2 Mo)
 app.use(express.json({ limit: '2mb' }));
-
-// 3. Sert tous les fichiers HTML/JS/CSS à la racine de room-checker-service
 app.use(express.static(__dirname));
 
-// 4. Route d'accueil
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
@@ -65,7 +100,6 @@ app.post('/api/register-hotel', async (req, res) => {
         const cleanName = hotelName.trim();
         const cleanEmail = adminEmail.trim().toLowerCase();
 
-        // VÉRIFICATION EXISTENCE NOM D'HÔTEL
         const allHotelsSnapshot = await db.collection('hotels').get();
         let existingHotelName = null;
 
@@ -84,7 +118,6 @@ app.post('/api/register-hotel', async (req, res) => {
             });
         }
 
-        // VÉRIFICATION UNICITÉ GLOBALE DE L'EMAIL ADMIN DANS CONFIG/USERS
         for (const hotelDoc of allHotelsSnapshot.docs) {
             const configUserDoc = await hotelDoc.ref.collection('config').doc('users').get();
             if (configUserDoc.exists) {
@@ -101,7 +134,6 @@ app.post('/api/register-hotel', async (req, res) => {
             }
         }
 
-        // CRÉATION DE L'HÔTEL
         const hotelRef = await db.collection('hotels').add({
             name: cleanName,
             createdAt: new Date().toISOString()
@@ -109,31 +141,34 @@ app.post('/api/register-hotel', async (req, res) => {
 
         const hotelId = hotelRef.id;
 
-        // CRÉATION DU COMPTE CRÉATEUR / MASTER ADMIN DANS CONFIG/USERS
-const salt = await bcrypt.genSalt(10);
-const hashedPassword = await bcrypt.hash(password.trim(), salt); // Un seul hash propre
-const adminId = 'usr_' + Date.now() + '_creator';
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password.trim(), salt);
+        const adminId = 'usr_' + Date.now() + '_creator';
 
-const creatorAdminUser = {
-    id: adminId,
-    fullName: adminName.trim(),
-    username: cleanEmail,
-    email: cleanEmail,
-    password: hashedPassword,     // <-- On met le hash ici aussi
-    passwordHash: hashedPassword, // <-- Et ici aussi
-    department: 'ADMIN',
-    role: 'superadmin',
-    isCreator: true,
-    colorMark: 'red',
-    createdBy: 'SYSTEM_REGISTER',
-    createdAt: new Date().toISOString()
-};
+        const creatorAdminUser = {
+            id: adminId,
+            fullName: adminName.trim(),
+            username: cleanEmail,
+            email: cleanEmail,
+            password: hashedPassword,
+            passwordHash: hashedPassword,
+            department: 'ADMIN',
+            role: 'superadmin',
+            isCreator: true,
+            colorMark: 'red',
+            createdBy: 'SYSTEM_REGISTER',
+            createdAt: new Date().toISOString()
+        };
 
         await db.collection('hotels').doc(hotelId).collection('config').doc('users').set({
             hotelId: hotelId,
             users: [creatorAdminUser],
             updatedAt: new Date().toISOString()
         });
+
+        // 🌟 3. SAUVEGARDE DANS LE DOSSIER LOCAL RC-LOCALDATA AUTOMATIQUE
+        saveToLocalMirror(hotelId, 'config', 'users', { hotelId, users: [creatorAdminUser] });
+        saveToLocalMirror(hotelId, '_meta', 'info', { name: cleanName, hotelId });
 
         return res.json({
             success: true,
@@ -149,7 +184,7 @@ const creatorAdminUser = {
 });
 
 // ==========================================
-// 2. ROUTE UNIQUE DE LOGIN
+// 2. ROUTE UNIQUE DE LOGIN (Avec Miroir Local)
 // ==========================================
 app.post('/api/login', async (req, res) => {
     const { username, email, password } = req.body;
@@ -165,9 +200,17 @@ app.post('/api/login', async (req, res) => {
         let foundHotel = null;
 
         for (const hotelDoc of hotelsSnapshot.docs) {
+            const hotelId = hotelDoc.id;
+            const hotelData = hotelDoc.data();
+            
             const configUserDoc = await hotelDoc.ref.collection('config').doc('users').get();
             if (configUserDoc.exists) {
                 const configData = configUserDoc.data();
+                
+                // 🌟 Sauvegarde automatique dans le miroir local à chaque lecture cloud réussie
+                saveToLocalMirror(hotelId, 'config', 'users', configData);
+                saveToLocalMirror(hotelId, '_meta', 'info', hotelData);
+
                 if (Array.isArray(configData.users)) {
                     const targetInConfig = configData.users.find(u => 
                         (u.username || '').trim().toLowerCase() === identifier ||
@@ -179,27 +222,40 @@ app.post('/api/login', async (req, res) => {
                             id: targetInConfig.id || targetInConfig.uid || targetInConfig.userId || ('usr_' + Date.now()),
                             ...targetInConfig
                         };
-                        foundHotel = { id: hotelDoc.id, ...hotelDoc.data() };
+                        foundHotel = { id: hotelId, ...hotelData };
                         break;
                     }
                 }
             }
+        }
 
-            const usersRef = hotelDoc.ref.collection('users');
-            let userSnapshot = await usersRef.where('email', '==', identifier).get();
-            if (userSnapshot.empty) {
-                userSnapshot = await usersRef.where('username', '==', identifier).get();
-            }
+        // --- MODE SECOURS LOCAL SI CLOUD INJOIGNABLE ---
+        if (!foundUser) {
+            console.warn("⚠️ Cloud injoignable ou utilisateur introuvable, tentative de connexion via le miroir RC-LOCALDATA...");
+            const hotelsDir = path.join(LOCAL_DATA_ROOT, 'hotels');
+            
+            if (fs.existsSync(hotelsDir)) {
+                const hotelDirs = fs.readdirSync(hotelsDir);
+                for (const hId of hotelDirs) {
+                    const localConfigUsers = readFromLocalMirror(hId, 'config', 'users');
+                    const localInfo = readFromLocalMirror(hId, '_meta', 'info');
 
-            if (!userSnapshot.empty) {
-                const userDoc = userSnapshot.docs[0];
-                const userData = userDoc.data();
-                foundUser = { 
-                    id: userDoc.id || userData.id || ('usr_' + Date.now()), 
-                    ...userData 
-                };
-                foundHotel = { id: hotelDoc.id, ...hotelDoc.data() };
-                break;
+                    if (localConfigUsers && Array.isArray(localConfigUsers.users)) {
+                        const targetInLocal = localConfigUsers.users.find(u => 
+                            (u.username || '').trim().toLowerCase() === identifier ||
+                            (u.email || '').trim().toLowerCase() === identifier
+                        );
+
+                        if (targetInLocal) {
+                            foundUser = {
+                                id: targetInLocal.id || ('usr_' + Date.now()),
+                                ...targetInLocal
+                            };
+                            foundHotel = { id: hId, name: localInfo ? localInfo.name : 'Hôtel Local' };
+                            break;
+                        }
+                    }
+                }
             }
         }
 
@@ -225,7 +281,7 @@ app.post('/api/login', async (req, res) => {
 
         return res.json({
             success: true,
-            mustChangePassword: foundUser.isFirstLogin === true, // <-- Ajoute cette ligne explicite
+            mustChangePassword: foundUser.isFirstLogin === true,
             user: foundUser,
             hotel: {
                 id: foundHotel.id,
@@ -245,7 +301,7 @@ app.post('/api/admin/login', (req, res) => {
 });
 
 // ==========================================
-// 3. GESTION DES UTILISATEURS DANS CONFIG/USERS
+// 3. GESTION DES UTILISATEURS DANS CONFIG/USERS (Avec Miroir & Fallback)
 // ==========================================
 
 app.get('/api/admin/users', async (req, res) => {
@@ -262,6 +318,10 @@ app.get('/api/admin/users', async (req, res) => {
         }
 
         const configData = docSnap.data();
+        
+        // 🌟 Mise à jour du miroir local préventivement
+        saveToLocalMirror(hotelId, 'config', 'users', configData);
+
         const usersList = (configData.users || []).map(u => {
             const copy = { ...u };
             delete copy.password;
@@ -271,8 +331,21 @@ app.get('/api/admin/users', async (req, res) => {
 
         return res.json({ success: true, users: usersList });
     } catch (error) {
-        console.error('Erreur chargement utilisateurs:', error);
-        return res.status(500).json({ success: false, message: 'Erreur serveur.' });
+        console.warn('⚠️ Cloud injoignable, bascule sur le miroir RC-LOCALDATA pour les utilisateurs...');
+        
+        // 🌟 Secours local si le cloud tombe
+        const localData = readFromLocalMirror(hotelId, 'config', 'users');
+        if (localData && Array.isArray(localData.users)) {
+            const usersList = localData.users.map(u => {
+                const copy = { ...u };
+                delete copy.password;
+                delete copy.passwordHash;
+                return copy;
+            });
+            return res.json({ success: true, users: usersList, source: 'RC-LOCALDATA-OFFLINE' });
+        }
+
+        return res.status(500).json({ success: false, message: 'Erreur serveur et données locales introuvables.' });
     }
 });
 
@@ -317,22 +390,31 @@ app.post('/api/admin/users', async (req, res) => {
 
         currentUsers.push(newUser);
 
-        await configDocRef.set({
+        const payloadToSave = {
             hotelId: hotelId,
             users: currentUsers,
             updatedAt: new Date().toISOString()
-        }, { merge: true });
+        };
+
+        await configDocRef.set(payloadToSave, { merge: true });
+
+        // 🌟 Sauvegarde immédiate dans le miroir local RC-LOCALDATA
+        saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
 
         const safeUser = { ...newUser };
         delete safeUser.password;
         delete safeUser.passwordHash;
 
-        return res.status(201).json({ success: true, message: 'Utilisateur créé avec succès dans config/users !', user: safeUser });
+        return res.status(201).json({ success: true, message: 'Utilisateur créé avec succès !', user: safeUser });
     } catch (error) {
         console.error('Erreur création utilisateur:', error);
         return res.status(500).json({ success: false, message: error.message });
     }
 });
+
+// ==========================================
+// ROUTES DE GESTION DES UTILISATEURS (Avec Miroir & Fallback Local)
+// ==========================================
 
 app.put('/api/admin/users/:id', async (req, res) => {
     const userId = req.params.id;
@@ -366,10 +448,34 @@ app.put('/api/admin/users/:id', async (req, res) => {
             updatedAt: new Date().toISOString()
         };
 
-        await configDocRef.update({ users, updatedAt: new Date().toISOString() });
+        const payloadToSave = { hotelId, users, updatedAt: new Date().toISOString() };
+        await configDocRef.update(payloadToSave);
+
+        // 🌟 Synchro miroir local
+        saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
+
         return res.json({ success: true, message: 'Utilisateur mis à jour avec succès !' });
     } catch (error) {
         console.error('Erreur mise à jour utilisateur:', error);
+        
+        // --- SECOURS LOCAL ---
+        const localData = readFromLocalMirror(hotelId, 'config', 'users');
+        if (localData && Array.isArray(localData.users)) {
+            const index = localData.users.findIndex(u => u.id === userId);
+            if (index !== -1) {
+                localData.users[index] = {
+                    ...localData.users[index],
+                    fullName: fullName ? fullName.trim() : localData.users[index].fullName,
+                    username: username ? username.trim().toLowerCase() : localData.users[index].username,
+                    department: department || localData.users[index].department,
+                    role: role || localData.users[index].role,
+                    updatedAt: new Date().toISOString()
+                };
+                saveToLocalMirror(hotelId, 'config', 'users', localData);
+                return res.json({ success: true, message: 'Utilisateur mis à jour (Mode Hors-ligne RC-LOCALDATA)' });
+            }
+        }
+
         return res.status(500).json({ success: false, message: error.message });
     }
 });
@@ -391,7 +497,6 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
 
         let users = docSnap.data().users || [];
 
-        // VÉRIFICATION STRICTE DU RÔLE EN BASE DE DONNÉES
         const requester = users.find(u => u.id === requesterId || u.username === requesterId);
         if (!requester || (requester.role || '').toLowerCase() !== 'superadmin') {
             return res.json({ 
@@ -409,10 +514,12 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
 
         users[index].password = hashedPassword;
         users[index].passwordHash = hashedPassword;
-        users[index].isFirstLogin = true; // Force le changement au prochain login
+        users[index].isFirstLogin = true; 
         users[index].updatedAt = new Date().toISOString();
 
-        await configDocRef.update({ users, updatedAt: new Date().toISOString() });
+        const payloadToSave = { hotelId, users, updatedAt: new Date().toISOString() };
+        await configDocRef.update(payloadToSave);
+        saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
 
         // 🧹 SUPPRESSION DE LA NOTIFICATION ASSOCIÉE
         const reqDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('passwordRequests');
@@ -420,7 +527,9 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
         if (reqDocSnap.exists) {
             let requests = reqDocSnap.data().requests || [];
             requests = requests.filter(r => r.userId !== targetUserId);
-            await reqDocRef.set({ requests, updatedAt: new Date().toISOString() });
+            const reqPayload = { requests, updatedAt: new Date().toISOString() };
+            await reqDocRef.set(reqPayload);
+            saveToLocalMirror(hotelId, 'config', 'passwordRequests', reqPayload);
         }
 
         return res.json({ success: true, message: 'Mot de passe réinitialisé avec succès !' });
@@ -438,13 +547,28 @@ app.get('/api/hotels/:hotelId/password-requests', async (req, res) => {
         const reqDocSnap = await reqDocRef.get();
 
         if (!reqDocSnap.exists) {
+            // Tenter le miroir local
+            const localReqs = readFromLocalMirror(hotelId, 'config', 'passwordRequests');
+            if (localReqs && localReqs.requests) {
+                return res.status(200).json(localReqs.requests);
+            }
             return res.status(200).json([]);
         }
 
-        const requests = reqDocSnap.data().requests || [];
+        const reqData = reqDocSnap.data();
+        saveToLocalMirror(hotelId, 'config', 'passwordRequests', reqData);
+
+        const requests = reqData.requests || [];
         return res.status(200).json(requests);
     } catch (error) {
         console.error("Erreur récupération password-requests:", error);
+        
+        // Secours local
+        const localReqs = readFromLocalMirror(hotelId, 'config', 'passwordRequests');
+        if (localReqs && localReqs.requests) {
+            return res.status(200).json(localReqs.requests);
+        }
+
         return res.status(500).json({ error: "Erreur serveur" });
     }
 });
@@ -468,7 +592,10 @@ app.delete('/api/admin/users/:id', async (req, res) => {
         let users = docSnap.data().users || [];
         const updatedUsers = users.filter(u => u.id !== userId);
 
-        await configDocRef.update({ users: updatedUsers, updatedAt: new Date().toISOString() });
+        const payloadToSave = { hotelId, users: updatedUsers, updatedAt: new Date().toISOString() };
+        await configDocRef.update(payloadToSave);
+        saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
+
         return res.json({ success: true, message: 'Utilisateur supprimé avec succès !' });
     } catch (error) {
         console.error('Erreur suppression utilisateur:', error);
@@ -484,15 +611,12 @@ app.post('/api/admin/config/users', async (req, res) => {
             return res.status(400).json({ error: 'Données invalides ou liste utilisateurs absente.' });
         }
 
-        // 1. Récupération du document existant pour sécuriser le créateur
         const docRef = db.collection('hotels').doc(hotelId).collection('config').doc('users');
         const docSnap = await docRef.get();
         const existingUsers = docSnap.exists ? (docSnap.data().users || []) : [];
 
-        // Isoler le(s) créateur(s) du compte
         const creators = existingUsers.filter(u => u.isCreator === true || u.isCreator === 'true');
 
-        // 2. Traitement et hachage des nouveaux utilisateurs importés
         const processedUsers = await Promise.all(users.map(async (user, index) => {
             const rawPassword = user.password || user.pass || '123456';
 
@@ -511,19 +635,20 @@ app.post('/api/admin/config/users', async (req, res) => {
             };
         }));
 
-        // 3. Filtrer les doublons de l'import pour ne pas dupliquer le créateur
         const filteredImported = processedUsers.filter(pUser => 
             !creators.some(c => (c.email && pUser.email && c.email.toLowerCase() === pUser.email.toLowerCase()) || c.id === pUser.id)
         );
 
-        // 4. Fusionner : Le créateur reste intact au début du tableau
         const finalUsers = [...creators, ...filteredImported];
 
-        await docRef.set({
+        const payloadToSave = {
             hotelId,
             users: finalUsers,
             updatedAt: new Date().toISOString()
-        });
+        };
+
+        await docRef.set(payloadToSave);
+        saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
 
         res.json({ message: 'Importation enregistrée sans impacter le créateur', users: finalUsers });
     } catch (error) {
@@ -554,18 +679,20 @@ app.patch('/api/admin/config/user-update', async (req, res) => {
             return res.status(404).json({ error: 'Utilisateur introuvable dans la liste.' });
         }
 
-        // On met à jour uniquement les champs envoyés, en conservant son mot de passe et ses données d'origine intactes
         users[userIndex] = {
             ...users[userIndex],
             ...updateData,
             updatedAt: new Date().toISOString()
         };
 
-        await docRef.set({
+        const payloadToSave = {
             hotelId,
             users: users,
             updatedAt: new Date().toISOString()
-        });
+        };
+
+        await docRef.set(payloadToSave);
+        saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
 
         res.json({ message: 'Utilisateur mis à jour avec succès', users: users });
     } catch (error) {
@@ -575,7 +702,7 @@ app.patch('/api/admin/config/user-update', async (req, res) => {
 });
 
 // ==========================================
-// 4. AUTRES CONFIGURATIONS
+// 4. AUTRES CONFIGURATIONS (Avec Miroir & Fallback)
 // ==========================================
 app.get('/api/admin/config/roles', async (req, res) => {
     const { hotelId } = req.query;
@@ -583,9 +710,17 @@ app.get('/api/admin/config/roles', async (req, res) => {
 
     try {
         const docSnap = await db.collection('hotels').doc(hotelId).collection('config').doc('roles').get();
-        if (!docSnap.exists) return res.json({ success: true, roles: [] });
-        return res.json({ success: true, ...docSnap.data() });
+        if (!docSnap.exists) {
+            const localRoles = readFromLocalMirror(hotelId, 'config', 'roles');
+            if (localRoles) return res.json({ success: true, ...localRoles });
+            return res.json({ success: true, roles: [] });
+        }
+        const data = docSnap.data();
+        saveToLocalMirror(hotelId, 'config', 'roles', data);
+        return res.json({ success: true, ...data });
     } catch (error) {
+        const localRoles = readFromLocalMirror(hotelId, 'config', 'roles');
+        if (localRoles) return res.json({ success: true, ...localRoles, source: 'RC-LOCALDATA-OFFLINE' });
         return res.status(500).json({ success: false, message: error.message });
     }
 });
@@ -595,10 +730,12 @@ app.post('/api/admin/config/roles', async (req, res) => {
     if (!hotelId || !Array.isArray(roles)) return res.status(400).json({ success: false, message: 'Données invalides.' });
 
     try {
-        await db.collection('hotels').doc(hotelId).collection('config').doc('roles').set({
+        const payloadToSave = {
             roles: roles,
             updatedAt: new Date().toISOString()
-        });
+        };
+        await db.collection('hotels').doc(hotelId).collection('config').doc('roles').set(payloadToSave);
+        saveToLocalMirror(hotelId, 'config', 'roles', payloadToSave);
         return res.json({ success: true, message: 'Rôles enregistrés avec succès !' });
     } catch (error) {
         return res.status(500).json({ success: false, message: error.message });
@@ -611,9 +748,17 @@ app.get('/api/admin/config/structure', async (req, res) => {
 
     try {
         const docSnap = await db.collection('hotels').doc(hotelId).collection('config').doc('structure').get();
-        if (!docSnap.exists) return res.json({ success: true, floors: {} });
-        return res.json({ success: true, ...docSnap.data() });
+        if (!docSnap.exists) {
+            const localStructure = readFromLocalMirror(hotelId, 'config', 'structure');
+            if (localStructure) return res.json({ success: true, ...localStructure });
+            return res.json({ success: true, floors: {} });
+        }
+        const data = docSnap.data();
+        saveToLocalMirror(hotelId, 'config', 'structure', data);
+        return res.json({ success: true, ...data });
     } catch (error) {
+        const localStructure = readFromLocalMirror(hotelId, 'config', 'structure');
+        if (localStructure) return res.json({ success: true, ...localStructure, source: 'RC-LOCALDATA-OFFLINE' });
         return res.status(500).json({ success: false, message: error.message });
     }
 });
@@ -623,11 +768,13 @@ app.post('/api/admin/config/structure', async (req, res) => {
     if (!hotelId || !floors) return res.status(400).json({ success: false, message: 'Données invalides.' });
 
     try {
-        await db.collection('hotels').doc(hotelId).collection('config').doc('structure').set({
+        const payloadToSave = {
             hotelId: hotelId,
             floors: floors,
             updatedAt: new Date().toISOString()
-        });
+        };
+        await db.collection('hotels').doc(hotelId).collection('config').doc('structure').set(payloadToSave);
+        saveToLocalMirror(hotelId, 'config', 'structure', payloadToSave);
         return res.json({ success: true, message: 'Structure enregistrée avec succès !' });
     } catch (error) {
         return res.status(500).json({ success: false, message: error.message });
@@ -635,7 +782,7 @@ app.post('/api/admin/config/structure', async (req, res) => {
 });
 
 // ==========================================
-// 5. GESTION DES TICKETS
+// 5. GESTION DES TICKETS (Avec Miroir & Fallback)
 // ==========================================
 app.get('/api/tickets', async (req, res) => {
     const { hotelId } = req.query;
@@ -645,8 +792,16 @@ app.get('/api/tickets', async (req, res) => {
         const snapshot = await db.collection('hotels').doc(hotelId).collection('tickets').get();
         const tickets = [];
         snapshot.forEach(doc => tickets.push({ id: doc.id, ...doc.data() }));
+        
+        // 🌟 Sauvegarde miroir globale des tickets de l'hôtel
+        saveToLocalMirror(hotelId, 'tickets', 'all_tickets', { tickets });
         return res.json({ success: true, tickets });
     } catch (error) {
+        // Secours local
+        const localTicketsData = readFromLocalMirror(hotelId, 'tickets', 'all_tickets');
+        if (localTicketsData && Array.isArray(localTicketsData.tickets)) {
+            return res.json({ success: true, tickets: localTicketsData.tickets, source: 'RC-LOCALDATA-OFFLINE' });
+        }
         return res.status(500).json({ success: false, message: error.message });
     }
 });
@@ -678,7 +833,14 @@ app.post('/api/tickets', async (req, res) => {
         };
 
         const docRef = await db.collection('hotels').doc(hotelId).collection('tickets').add(newTicket);
-        return res.json({ success: true, id: docRef.id, ticket: { id: docRef.id, ...newTicket }, message: 'Ticket créé avec succès !' });
+        const ticketWithId = { id: docRef.id, ...newTicket };
+
+        // 🌟 Mettre à jour le miroir local des tickets
+        const localTicketsData = readFromLocalMirror(hotelId, 'tickets', 'all_tickets') || { tickets: [] };
+        localTicketsData.tickets.push(ticketWithId);
+        saveToLocalMirror(hotelId, 'tickets', 'all_tickets', localTicketsData);
+
+        return res.json({ success: true, id: docRef.id, ticket: ticketWithId, message: 'Ticket créé avec succès !' });
     } catch (error) {
         return res.status(500).json({ success: false, message: error.message });
     }
@@ -715,6 +877,17 @@ app.put('/api/tickets/:id/status', async (req, res) => {
         }
 
         await ticketRef.update(updateData);
+
+        // Mettre à jour le miroir local
+        const localTicketsData = readFromLocalMirror(hotelId, 'tickets', 'all_tickets');
+        if (localTicketsData && Array.isArray(localTicketsData.tickets)) {
+            const tIndex = localTicketsData.tickets.findIndex(t => t.id === ticketId);
+            if (tIndex !== -1) {
+                localTicketsData.tickets[tIndex] = { ...localTicketsData.tickets[tIndex], ...updateData };
+                saveToLocalMirror(hotelId, 'tickets', 'all_tickets', localTicketsData);
+            }
+        }
+
         return res.json({ success: true, message: 'Statut mis à jour !' });
     } catch (error) {
         return res.status(500).json({ success: false, message: error.message });
@@ -734,13 +907,21 @@ app.delete('/api/tickets/:id', async (req, res) => {
         if (!doc.exists) return res.status(404).json({ success: false, message: 'Ticket introuvable.' });
 
         await ticketRef.delete();
+
+        // Mettre à jour le miroir local
+        const localTicketsData = readFromLocalMirror(hotelId, 'tickets', 'all_tickets');
+        if (localTicketsData && Array.isArray(localTicketsData.tickets)) {
+            localTicketsData.tickets = localTicketsData.tickets.filter(t => t.id !== ticketId);
+            saveToLocalMirror(hotelId, 'tickets', 'all_tickets', localTicketsData);
+        }
+
         return res.json({ success: true, message: 'Ticket supprimé avec succès !' });
     } catch (error) {
         return res.status(500).json({ success: false, message: error.message });
     }
 });
 
-// --- ROUTE PUBLIQUE (Sans middleware de sécurité) ---
+// --- ROUTE PUBLIQUE (Avec secours hors-ligne RC-LOCALDATA) ---
 app.post('/api/public-action', async (req, res) => {
     const { action, dataPayload } = req.body;
 
@@ -752,20 +933,32 @@ app.post('/api/public-action', async (req, res) => {
             let foundFullName = null;
 
             for (const hotelDoc of hotelsSnapshot.docs) {
-                const userDocSnap = await db.collection('hotels').doc(hotelDoc.id).collection('config').doc('users').get();
+                const hotelId = hotelDoc.id;
+                const userDocSnap = await db.collection('hotels').doc(hotelId).collection('config').doc('users').get();
+                
+                let usersList = [];
                 if (userDocSnap.exists) {
                     const data = userDocSnap.data();
-                    const usersList = Array.isArray(data.users) ? data.users : Object.values(data);
-                    const matchedUser = usersList.find(u => 
-                        u && typeof u === 'object' && (
-                            (u.email && u.email.trim().toLowerCase() === identifier) || 
-                            (u.username && u.username.trim().toLowerCase() === identifier)
-                        )
-                    );
-                    if (matchedUser) {
-                        foundFullName = matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim();
-                        break;
+                    usersList = Array.isArray(data.users) ? data.users : Object.values(data);
+                    saveToLocalMirror(hotelId, 'config', 'users', data);
+                } else {
+                    // Secours miroir local
+                    const localData = readFromLocalMirror(hotelId, 'config', 'users');
+                    if (localData && Array.isArray(localData.users)) {
+                        usersList = localData.users;
                     }
+                }
+
+                const matchedUser = usersList.find(u => 
+                    u && typeof u === 'object' && (
+                        (u.email && u.email.trim().toLowerCase() === identifier) || 
+                        (u.username && u.username.trim().toLowerCase() === identifier)
+                    )
+                );
+
+                if (matchedUser) {
+                    foundFullName = matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim();
+                    break;
                 }
             }
 
@@ -775,8 +968,37 @@ app.post('/api/public-action', async (req, res) => {
                 return res.json({ success: false, message: "Utilisateur non trouvé" });
             }
         } catch (err) {
-            console.error("Erreur Firestore GET_USER_NAME:", err);
-            return res.status(500).json({ success: false, message: "Erreur serveur" });
+            console.warn("⚠️ Cloud injoignable pour GET_USER_NAME, recherche dans les miroirs locaux...");
+            
+            // 🌟 Recherche par répertoires locaux si Firestore échoue totalement
+            const hotelsDir = path.join(LOCAL_DATA_ROOT, 'hotels');
+            const identifier = dataPayload?.identifier?.trim().toLowerCase();
+            let foundFullName = null;
+
+            if (fs.existsSync(hotelsDir)) {
+                const hotelDirs = fs.readdirSync(hotelsDir);
+                for (const hId of hotelDirs) {
+                    const localData = readFromLocalMirror(hId, 'config', 'users');
+                    if (localData && Array.isArray(localData.users)) {
+                        const matchedUser = localData.users.find(u => 
+                            u && typeof u === 'object' && (
+                                (u.email && u.email.trim().toLowerCase() === identifier) || 
+                                (u.username && u.username.trim().toLowerCase() === identifier)
+                            )
+                        );
+                        if (matchedUser) {
+                            foundFullName = matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim();
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (foundFullName) {
+                return res.json({ success: true, fullName: foundFullName, source: 'RC-LOCALDATA-OFFLINE' });
+            }
+
+            return res.status(500).json({ success: false, message: "Erreur serveur et données locales introuvables" });
         }
     }
 
@@ -793,22 +1015,31 @@ app.post('/api/public-action', async (req, res) => {
             let matchedUser = null;
 
             for (const hotelDoc of hotelsSnapshot.docs) {
-                const userDocSnap = await db.collection('hotels').doc(hotelDoc.id).collection('config').doc('users').get();
+                const hotelId = hotelDoc.id;
+                const userDocSnap = await db.collection('hotels').doc(hotelId).collection('config').doc('users').get();
+                
+                let usersList = [];
                 if (userDocSnap.exists) {
                     const data = userDocSnap.data();
-                    const usersList = Array.isArray(data.users) ? data.users : Object.values(data);
-                    
-                    matchedUser = usersList.find(u => 
-                        u && typeof u === 'object' && (
-                            (u.email && u.email.trim().toLowerCase() === identifier) || 
-                            (u.username && u.username.trim().toLowerCase() === identifier)
-                        )
-                    );
-
-                    if (matchedUser) {
-                        targetHotelId = hotelDoc.id;
-                        break;
+                    usersList = Array.isArray(data.users) ? data.users : Object.values(data);
+                    saveToLocalMirror(hotelId, 'config', 'users', data);
+                } else {
+                    const localData = readFromLocalMirror(hotelId, 'config', 'users');
+                    if (localData && Array.isArray(localData.users)) {
+                        usersList = localData.users;
                     }
+                }
+                
+                matchedUser = usersList.find(u => 
+                    u && typeof u === 'object' && (
+                        (u.email && u.email.trim().toLowerCase() === identifier) || 
+                        (u.username && u.username.trim().toLowerCase() === identifier)
+                    )
+                );
+
+                if (matchedUser) {
+                    targetHotelId = hotelId;
+                    break;
                 }
             }
 
@@ -828,7 +1059,9 @@ app.post('/api/public-action', async (req, res) => {
                     identifier: matchedUser.username || matchedUser.email,
                     createdAt: new Date().toISOString()
                 });
-                await reqDocRef.set({ requests, updatedAt: new Date().toISOString() });
+                const reqPayload = { requests, updatedAt: new Date().toISOString() };
+                await reqDocRef.set(reqPayload);
+                saveToLocalMirror(targetHotelId, 'config', 'passwordRequests', reqPayload);
             }
 
             return res.json({ success: true, message: "Demande envoyée à l'administration." });
@@ -841,14 +1074,13 @@ app.post('/api/public-action', async (req, res) => {
     return res.status(400).json({ success: false, message: "Action publique non reconnue." });
 });
 
-// ==========================================================
-// MIDDLEWARE SÉCURITÉ (SILENCIEUX CÔTÉ NAVIGATEUR - HTTP 200)
-// ==========================================================
+// ==========================================
+// MIDDLEWARE SÉCURITÉ (SILENCIEUX CÔTÉ NAVIGATEUR - HTTP 200 + Miroir Local)
+// ==========================================
 async function verifierPermissionServeur(req, res, next) {
     const body = req.body || {};
     const query = req.query || {};
 
-    // 1. Détection flexible de l'identifiant
     const userIdentifier = body.username || body.userEmail || body.email || query.username || query.userEmail || query.email || query.identifier;
     const hotelId = body.hotelId || query.hotelId;
     const frontRole = body.userRole;
@@ -863,22 +1095,37 @@ async function verifierPermissionServeur(req, res, next) {
     }
 
     try {
-        // 2. Récupération des utilisateurs réels dans Firestore
-        const userDoc = await db.collection("hotels")
-                                .doc(hotelId)
-                                .collection("config")
-                                .doc("users")
-                                .get();
-        
-        if (!userDoc.exists) {
+        let configData = null;
+        let usersList = [];
+
+        try {
+            const userDoc = await db.collection("hotels")
+                                    .doc(hotelId)
+                                    .collection("config")
+                                    .doc("users")
+                                    .get();
+            
+            if (userDoc.exists) {
+                configData = userDoc.data();
+                usersList = Array.isArray(configData.users) ? configData.users : [];
+                // 🌟 Sauvegarde automatique dans le miroir local
+                saveToLocalMirror(hotelId, 'config', 'users', configData);
+            }
+        } catch (cloudErr) {
+            console.warn("⚠️ Cloud injoignable dans le middleware, lecture du miroir local RC-LOCALDATA...");
+            const localData = readFromLocalMirror(hotelId, 'config', 'users');
+            if (localData) {
+                configData = localData;
+                usersList = Array.isArray(localData.users) ? localData.users : [];
+            }
+        }
+
+        if (!configData || usersList.length === 0) {
             return res.json({ success: false, code: 403, message: "Accès refusé." });
         }
 
-        const configData = userDoc.data();
-        const usersList = Array.isArray(configData.users) ? configData.users : [];
         const cleanIdentifier = String(userIdentifier).trim().toLowerCase();
 
-        // 3. Identification du User dans Firestore via username ou email
         const realUser = usersList.find(u => {
             const uName = (u.username || '').trim().toLowerCase();
             const uEmail = (u.email || '').trim().toLowerCase();
@@ -889,11 +1136,8 @@ async function verifierPermissionServeur(req, res, next) {
             return res.json({ success: false, code: 403, message: "Accès refusé." });
         }
 
-        // --- GESTION MULTI-RÔLES EN BDD ---
-        // On récupère le champ 'role' (qui peut être "Housekeeping, Reception") ou un tableau 'roles'
         const rawRoleFromDb = realUser.role || realUser.roles || '';
         
-        // On transforme systématiquement en un tableau propre de rôles en minuscules
         let realUserRolesList = [];
         if (typeof rawRoleFromDb === 'string') {
             realUserRolesList = rawRoleFromDb.split(',').map(r => r.trim().toLowerCase()).filter(r => r.length > 0);
@@ -901,15 +1145,10 @@ async function verifierPermissionServeur(req, res, next) {
             realUserRolesList = rawRoleFromDb.map(r => String(r).trim().toLowerCase()).filter(r => r.length > 0);
         }
 
-        // Pour compatibilité si le reste du code a besoin d'une chaîne principale
         const realUserRole = realUserRolesList.join(', ');
 
-        // 4. CONTRÔLE SÉCURITÉ ANTI-ALTÉRATION (Support multi-rôles front)
         if (frontRole) {
-            // On découpe aussi le rôle envoyé par le front au cas où il contiendrait des virgules
             const frontRolesList = String(frontRole).split(',').map(r => r.trim().toLowerCase()).filter(r => r.length > 0);
-            
-            // On vérifie que tous les rôles revendiqués par le front font bien partie des rôles réels de l'utilisateur en BDD
             const isFrontRoleValid = frontRolesList.every(fRole => realUserRolesList.includes(fRole));
 
             if (!isFrontRoleValid) {
@@ -921,14 +1160,11 @@ async function verifierPermissionServeur(req, res, next) {
             }
         }
 
-        // 5. VÉRIFICATION DYNAMIQUE DE PRIVILÈGES (Multi-rôles supporté)
         if (requiredRole) {
-            // Le rôle requis peut être un tableau ou une chaîne unique
             const requiredArray = Array.isArray(requiredRole) 
                 ? requiredRole.map(r => String(r).trim().toLowerCase()) 
                 : [String(requiredRole).trim().toLowerCase()];
 
-            // On regarde si l'utilisateur possède AU MOINS l'un des rôles requis
             const allowed = requiredArray.some(reqR => realUserRolesList.includes(reqR));
 
             if (!allowed) {
@@ -952,7 +1188,7 @@ async function verifierPermissionServeur(req, res, next) {
 }
 
 // ==========================================
-// GESTION CONFIGURATION DYNAMIQUE
+// GESTION CONFIGURATION DYNAMIQUE (Avec Miroir & Fallback)
 // ==========================================
 app.get('/api/admin/config/:configDoc', verifierPermissionServeur, async (req, res) => {
     const { configDoc } = req.params;
@@ -970,12 +1206,20 @@ app.get('/api/admin/config/:configDoc', verifierPermissionServeur, async (req, r
             .get();
 
         if (!docSnap.exists) {
+            const localData = readFromLocalMirror(hotelId, 'config', configDoc);
+            if (localData) return res.json({ success: true, ...localData });
             return res.json({ success: true, [configDoc]: [] });
         }
 
-        return res.json({ success: true, ...docSnap.data() });
+        const data = docSnap.data();
+        saveToLocalMirror(hotelId, 'config', configDoc, data);
+        return res.json({ success: true, ...data });
     } catch (err) {
-        console.error(`Erreur GET config/${configDoc}:`, err);
+        console.warn(`⚠️ Cloud injoignable pour config/${configDoc}, bascule sur le miroir local...`);
+        const localData = readFromLocalMirror(hotelId, 'config', configDoc);
+        if (localData) {
+            return res.json({ success: true, ...localData, source: 'RC-LOCALDATA-OFFLINE' });
+        }
         return res.status(500).json({ success: false, message: "Erreur lors de la récupération." });
     }
 });
@@ -1001,14 +1245,18 @@ app.post('/api/admin/config/:configDoc', verifierPermissionServeur, async (req, 
             .doc(configDoc)
             .set(payload, { merge: true });
 
+        // 🌟 Synchro miroir local immédiate
+        saveToLocalMirror(hotelId, 'config', configDoc, payload);
+
         return res.json({ success: true, message: `Configuration ${configDoc} sauvegardée.` });
     } catch (err) {
         console.error(`Erreur POST config/${configDoc}:`, err);
         return res.status(500).json({ success: false, message: "Erreur lors de la sauvegarde." });
     }
 });
+
 // ==========================================
-// ROUTE EXPLICITE POUR LES DÉPARTEMENTS
+// ROUTE EXPLICITE POUR LES DÉPARTEMENTS (Avec Miroir & Fallback)
 // ==========================================
 app.get('/api/admin/config/departement', verifierPermissionServeur, async (req, res) => {
     const hotelId = req.targetHotelId || req.query.hotelId;
@@ -1020,16 +1268,21 @@ app.get('/api/admin/config/departement', verifierPermissionServeur, async (req, 
         const docSnap = await db.collection("hotels")
             .doc(hotelId)
             .collection("config")
-            .doc("departement") // Assure-toi que le nom du doc correspond dans Firestore
+            .doc("departement")
             .get();
 
         if (!docSnap.exists) {
+            const localData = readFromLocalMirror(hotelId, 'config', 'departement');
+            if (localData) return res.json({ success: true, ...localData });
             return res.json({ success: true, departement: [] });
         }
 
-        return res.json({ success: true, ...docSnap.data() });
+        const data = docSnap.data();
+        saveToLocalMirror(hotelId, 'config', 'departement', data);
+        return res.json({ success: true, ...data });
     } catch (err) {
-        console.error("Erreur GET config/departement:", err);
+        const localData = readFromLocalMirror(hotelId, 'config', 'departement');
+        if (localData) return res.json({ success: true, ...localData, source: 'RC-LOCALDATA-OFFLINE' });
         return res.status(500).json({ success: false, message: "Erreur lors de la récupération." });
     }
 });
@@ -1053,6 +1306,8 @@ app.post('/api/admin/config/departement', verifierPermissionServeur, async (req,
             .doc("departement")
             .set(payload, { merge: true });
 
+        saveToLocalMirror(hotelId, 'config', 'departement', payload);
+
         return res.json({ success: true, message: "Configuration départements sauvegardée." });
     } catch (err) {
         console.error("Erreur POST config/departement:", err);
@@ -1061,13 +1316,12 @@ app.post('/api/admin/config/departement', verifierPermissionServeur, async (req,
 });
 
 // ==========================================
-// ROUTE GÉNÉRIQUE EXÉCUTION ACTIONS DB
+// ROUTE GÉNÉRIQUE EXÉCUTION ACTIONS DB (Avec Miroir & Fallback)
 // ==========================================
 app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) => {
     const { action, collectionName, docId, dataPayload } = req.body;
     const hotelId = req.targetHotelId || req.body.hotelId;
 
-    // --- ACTION : Récupérer les demandes de réinitialisation de mot de passe (Côté Admin) ---
     if (action === 'GET_PASSWORD_REQUESTS') {
         try {
             if (!hotelId) {
@@ -1075,15 +1329,26 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
             }
             const reqDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('passwordRequests');
             const reqDocSnap = await reqDocRef.get();
-            const requests = reqDocSnap.exists ? (reqDocSnap.data().requests || []) : [];
+            
+            let requests = [];
+            if (reqDocSnap.exists) {
+                requests = reqDocSnap.data().requests || [];
+                saveToLocalMirror(hotelId, 'config', 'passwordRequests', { requests });
+            } else {
+                const localData = readFromLocalMirror(hotelId, 'config', 'passwordRequests');
+                if (localData && localData.requests) requests = localData.requests;
+            }
             return res.json({ success: true, requests });
         } catch (err) {
-            console.error("Erreur GET_PASSWORD_REQUESTS:", err);
+            console.warn("⚠️ Cloud injoignable pour GET_PASSWORD_REQUESTS, lecture miroir local...");
+            const localData = readFromLocalMirror(hotelId, 'config', 'passwordRequests');
+            if (localData && localData.requests) {
+                return res.json({ success: true, requests: localData.requests, source: 'RC-LOCALDATA-OFFLINE' });
+            }
             return res.status(500).json({ success: false, message: "Erreur serveur" });
         }
     }
 
-    // Action personnalisée : Récupération des métadonnées pour export PDF/Excel
     if (action === 'GET_EXPORT_METADATA') {
         try {
             let hotelName = null;
@@ -1091,6 +1356,10 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
                 const hotelDoc = await db.collection('hotels').doc(hotelId).get();
                 if (hotelDoc.exists) {
                     hotelName = hotelDoc.data().name || null;
+                    saveToLocalMirror(hotelId, '_meta', 'info', hotelDoc.data());
+                } else {
+                    const localInfo = readFromLocalMirror(hotelId, '_meta', 'info');
+                    if (localInfo) hotelName = localInfo.name || null;
                 }
             }
 
@@ -1110,7 +1379,6 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
         }
     }
 
-    // Action personnalisée : Mise à jour d'un seul utilisateur sans impacter son mot de passe
     if (collectionName === 'config' && docId === 'users' && action === 'UPDATE_SINGLE_USER') {
         try {
             const { userId, updateData } = dataPayload || {};
@@ -1129,18 +1397,20 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
                 return res.json({ success: false, message: 'Utilisateur introuvable dans la liste.' });
             }
 
-            // On fusionne les nouvelles modifications tout en préservant son mot de passe existant
             users[userIndex] = {
                 ...users[userIndex],
                 ...updateData,
                 updatedAt: new Date().toISOString()
             };
 
-            await docRef.set({
+            const payloadToSave = {
                 hotelId,
                 users: users,
                 updatedAt: new Date().toISOString()
-            });
+            };
+
+            await docRef.set(payloadToSave);
+            saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
 
             return res.json({ success: true, users: users });
         } catch (err) {
@@ -1149,12 +1419,10 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
         }
     }
 
-    // On retire docId des vérifications obligatoires initiales
     if (!action || !collectionName || !hotelId) {
         return res.status(400).json({ success: false, message: "Champs action, collectionName et hotelId requis." });
     }
 
-    // Le docId reste obligatoire uniquement pour UPDATE et DELETE
     if ((action === 'UPDATE' || action === 'DELETE') && !docId) {
         return res.status(400).json({ success: false, message: "docId requis pour cette action." });
     }
@@ -1171,12 +1439,10 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
             return res.json({ success: true, message: "Mise à jour effectuée avec succès." });
         }
         else if (action === 'CREATE') {
-            // Génération d'un ID personnalisé basé sur la date et l'heure précise
             const now = new Date();
             const timestamp = now.toISOString().replace(/[:.]/g, '-');
             const customDocId = `ticket_${timestamp}`;
 
-            // On enregistre le document avec ton ID personnalisé
             await collectionRef.doc(customDocId).set(dataPayload || {});
             return res.json({ success: true, message: "Création effectuée avec succès.", docId: customDocId });
         }
@@ -1187,20 +1453,31 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
         return res.status(500).json({ success: false, message: "Erreur serveur lors de l'opération." });
     }
 });
-// Récupérer les informations d'un hôtel par son ID
+// ==========================================
+// RÉCUPÉRATION D'UN HÔTEL (Avec Miroir & Fallback)
+// ==========================================
 app.get('/api/hotels/:id', async (req, res) => {
+    const hotelId = req.params.id;
     try {
-        const doc = await db.collection('hotels').doc(req.params.id).get();
+        const doc = await db.collection('hotels').doc(hotelId).get();
         if (!doc.exists) {
+            // Secours miroir local
+            const localData = readFromLocalMirror(hotelId, '_meta', 'info');
+            if (localData) return res.json({ id: hotelId, ...localData, source: 'RC-LOCALDATA-OFFLINE' });
             return res.status(404).json({ message: "Hôtel introuvable" });
         }
-        res.json({ id: doc.id, ...doc.data() });
+        const data = doc.data();
+        saveToLocalMirror(hotelId, '_meta', 'info', data);
+        res.json({ id: doc.id, ...data });
     } catch (error) {
+        const localData = readFromLocalMirror(hotelId, '_meta', 'info');
+        if (localData) return res.json({ id: hotelId, ...localData, source: 'RC-LOCALDATA-OFFLINE' });
         res.status(500).json({ error: error.message });
     }
 });
+
 // ==========================================
-// MISE À JOUR DU PREMIER MOT DE PASSE (Compatible config/users)
+// MISE À JOUR DU PREMIER MOT DE PASSE (Avec Synchro Miroir)
 // ==========================================
 app.post('/api/admin/users/update-first-login-password', async (req, res) => {
     try {
@@ -1211,15 +1488,28 @@ app.post('/api/admin/users/update-first-login-password', async (req, res) => {
         }
 
         const configDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('users');
-        const docSnap = await configDocRef.get();
+        let docSnap;
+        let users = [];
 
-        if (!docSnap.exists) {
+        try {
+            docSnap = await configDocRef.get();
+            if (docSnap.exists) {
+                users = docSnap.data().users || [];
+                saveToLocalMirror(hotelId, 'config', 'users', docSnap.data());
+            }
+        } catch (cloudErr) {
+            console.warn("⚠️ Cloud injoignable, lecture du miroir local pour l'authentification...");
+            const localData = readFromLocalMirror(hotelId, 'config', 'users');
+            if (localData && Array.isArray(localData.users)) {
+                users = localData.users;
+            }
+        }
+
+        if (users.length === 0) {
             return res.status(404).json({ success: false, message: "Dossier utilisateurs introuvable." });
         }
 
-        let users = docSnap.data().users || [];
         const index = users.findIndex(u => u.id === userId);
-
         if (index === -1) {
             return res.status(404).json({ success: false, message: "Utilisateur introuvable." });
         }
@@ -1227,7 +1517,6 @@ app.post('/api/admin/users/update-first-login-password', async (req, res) => {
         const targetUser = users[index];
         const pwdToCompare = targetUser.password || targetUser.passwordHash || '';
 
-        // 🛡️ Vérification sécurisée de l'ancien mot de passe via bcrypt
         let isOldPasswordValid = false;
         if (typeof bcrypt !== 'undefined' && bcrypt.compareSync) {
             isOldPasswordValid = bcrypt.compareSync(oldPassword, pwdToCompare);
@@ -1239,12 +1528,10 @@ app.post('/api/admin/users/update-first-login-password', async (req, res) => {
             return res.status(400).json({ success: false, message: "L'ancien mot de passe est incorrect." });
         }
 
-        // 🛑 Empêcher l'utilisateur de remettre exactement le même mot de passe
         if (oldPassword === newPassword.trim()) {
             return res.status(400).json({ success: false, message: "Le nouveau mot de passe doit être différent de l'ancien." });
         }
 
-        // Hachage sécurisé du nouveau mot de passe
         const hashedPassword = await bcrypt.hash(newPassword.trim(), 10);
 
         users[index] = {
@@ -1256,76 +1543,104 @@ app.post('/api/admin/users/update-first-login-password', async (req, res) => {
             updatedAt: new Date().toISOString()
         };
 
-        await configDocRef.update({ users, updatedAt: new Date().toISOString() });
+        const payloadToSave = {
+            hotelId,
+            users,
+            updatedAt: new Date().toISOString()
+        };
+
+        try {
+            await configDocRef.set(payloadToSave, { merge: true });
+        } catch (dbErr) {
+            console.warn("⚠️ Écriture Firestore échouée, mise à jour enregistrée uniquement dans le miroir local.");
+        }
+
+        // 🌟 Mise à jour immédiate du miroir local
+        saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
 
         return res.json({ success: true, message: "Mot de passe mis à jour avec succès." });
 
     } catch (error) {
-        // 🔒 Log neutre pour ne laisser aucune trace exploitable par un hacker
         console.error("Erreur de sécurité lors du traitement du mot de passe.");
         return res.status(500).json({ success: false, message: "Erreur serveur interne." });
     }
 });
-// Route Express pour récupérer les réservations d'un hôtel de manière sécurisée
+
+// ==========================================
+// RÉCUPÉRATION DES RÉSERVATIONS (Avec Miroir & Fallback)
+// ==========================================
 app.get('/api/hotels/:hotelId/bookings', async (req, res) => {
     try {
         const { hotelId } = req.params;
         const userId = req.headers['x-user-id'];
 
-        // Optionnel : Vérification de sécurité avec le userId si nécessaire
         if (!userId) {
             return res.status(401).json({ error: "Utilisateur non authentifié." });
         }
 
-        // Récupération dynamique depuis la sous-collection Firestore
         const bookingsRef = db.collection('hotels').doc(hotelId).collection('bookings');
-        const snapshot = await bookingsRef.get();
+        let snapshot;
+        let bookings = [];
+        let isOfflineMode = false;
 
-        const bookings = [];
-        const batch = db.batch(); // Permet de grouper les modifications Firestore pour optimiser
-        let hasChanges = false;
-        const now = new Date(); // Heure actuelle du serveur
+        try {
+            snapshot = await bookingsRef.get();
+            const batch = db.batch();
+            let hasChanges = false;
+            const now = new Date();
 
-        snapshot.forEach(doc => {
-            const data = doc.data();
-            let currentStatus = data.status || 'RÉSERVÉE';
-            let calculatedStatus = currentStatus;
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                let currentStatus = data.status || 'RÉSERVÉE';
+                let calculatedStatus = currentStatus;
 
-            // On s'assure d'avoir les dates de check-in et check-out valides
-            const checkIn = data.checkIn ? new Date(data.checkIn) : null;
-            const checkOut = data.checkOut ? new Date(data.checkOut) : null;
+                const checkIn = data.checkIn ? new Date(data.checkIn) : null;
+                const checkOut = data.checkOut ? new Date(data.checkOut) : null;
 
-            if (checkIn && checkOut && !isNaN(checkIn) && !isNaN(checkOut)) {
-                // Logique intelligente d'évolution du statut en fonction du temps
-                if (now > checkOut) {
-                    calculatedStatus = 'TERMINÉE';
-                } else if (now >= checkIn && now <= checkOut) {
-                    calculatedStatus = 'OCCUPÉE';
-                } else if (now < checkIn) {
-                    // Si on est avant la date de check-in, on garde 'RÉSERVÉE' 
-                    // (sauf si un autre statut manuel spécifique existe)
-                    if (currentStatus !== 'ANNULÉE') {
-                        calculatedStatus = 'RÉSERVÉE';
+                if (checkIn && checkOut && !isNaN(checkIn) && !isNaN(checkOut)) {
+                    if (now > checkOut) {
+                        calculatedStatus = 'TERMINÉE';
+                    } else if (now >= checkIn && now <= checkOut) {
+                        calculatedStatus = 'OCCUPÉE';
+                    } else if (now < checkIn) {
+                        if (currentStatus !== 'ANNULÉE') {
+                            calculatedStatus = 'RÉSERVÉE';
+                        }
+                    }
+
+                    if (calculatedStatus !== currentStatus) {
+                        hasChanges = true;
+                        batch.update(doc.ref, { status: calculatedStatus });
+                        data.status = calculatedStatus;
                     }
                 }
 
-                // Si le statut calculé diffère de celui enregistré dans Firestore, on met à jour
-                if (calculatedStatus !== currentStatus) {
-                    hasChanges = true;
-                    batch.update(doc.ref, { status: calculatedStatus });
-                    data.status = calculatedStatus; // Met à jour l'objet renvoyé immédiatement
-                }
+                bookings.push({
+                    id: doc.id,
+                    ...data
+                });
+            });
+
+            if (hasChanges) {
+                await batch.commit().catch(() => {});
             }
 
-            bookings.push({
-                id: doc.id,
-                ...data
-            });
-        });
+            // 🌟 Sauvegarde miroir globale des réservations
+            saveToLocalMirror(hotelId, 'bookings', 'all_bookings', { bookings });
 
-        // Si des statuts ont évolué avec le temps, on valide les modifications dans Firestore
-        if (hasChanges) {
-            await batch.commit();
+        } catch (cloudErr) {
+            console.warn("⚠️ Cloud injoignable pour les réservations, chargement du miroir local RC-LOCALDATA...");
+            isOfflineMode = true;
+            const localBookingData = readFromLocalMirror(hotelId, 'bookings', 'all_bookings');
+            if (localBookingData && Array.isArray(localBookingData.bookings)) {
+                bookings = localBookingData.bookings;
+            } else {
+                return res.status(500).json({ error: "Erreur interne et aucune donnée de réservation locale disponible." });
+            }
+        }
+
+        if (isOfflineMode) {
+            return res.status(200).json({ bookings, source: 'RC-LOCALDATA-OFFLINE' });
         }
 
         res.status(200).json(bookings);
@@ -1334,6 +1649,7 @@ app.get('/api/hotels/:hotelId/bookings', async (req, res) => {
         res.status(500).json({ error: "Erreur interne du serveur." });
     }
 });
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 Serveur API Room Check démarré sur le port ${PORT}`);
