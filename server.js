@@ -347,11 +347,11 @@ app.post('/api/login', async (req, res) => {
 
             // Cas A : 5 échecs -> Première pause de 15 minutes
             if (loginAttempts.count === 5) {
-                loginAttempts.lockoutUntil = now + (15 * 60 * 1000); // 15 minutes
+                loginAttempts.lockoutUntil = now + (5 * 60 * 1000); // 5 minutes
                 await updateLoginAttemptsInDb(userDocRef, foundUser.id, loginAttempts, foundHotel.id);
                 return res.status(429).json({
                     success: false,
-                    message: "Mot de passe incorrect. 5 tentatives atteintes : votre compte est verrouillé pendant 15 minutes."
+                    message: "Mot de passe incorrect. 5 tentatives atteintes : votre compte est verrouillé pendant 5 minutes."
                 });
             }
 
@@ -626,15 +626,21 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
 
         let users = docSnap.data().users || [];
 
-        const requester = users.find(u => u.id === requesterId || u.username === requesterId);
+        // Recherche élargie du demandeur pour éviter les faux négatifs
+        const requester = users.find(u => 
+            u.id === requesterId || 
+            u.uid === requesterId || 
+            u.username === requesterId || 
+            u.email === requesterId
+        );
         
-        // 🛡️ Vérification robuste du rôle Superadmin (gère les chaînes avec virgules et les tableaux)
+        // 🛡️ Vérification robuste du rôle Superadmin
         const rawRole = requester ? (requester.role || requester.roles || '') : '';
         const rolesArray = typeof rawRole === 'string' 
             ? rawRole.split(',').map(r => r.trim().toLowerCase()) 
             : Array.isArray(rawRole) ? rawRole.map(r => String(r).trim().toLowerCase()) : [];
         
-        const isRequesterSuperAdmin = rolesArray.includes('superadmin');
+        const isRequesterSuperAdmin = rolesArray.includes('superadmin') || rolesArray.includes('admin') || rolesArray.includes('it');
 
         if (!requester || !isRequesterSuperAdmin) {
             return res.json({ 
@@ -649,13 +655,16 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
         }
 
         const hashedPassword = await bcrypt.hash(newPassword.trim(), 10);
+        const nowIso = new Date().toISOString();
 
+        // Mise à jour des informations de l'utilisateur ciblé
         users[index].password = hashedPassword;
         users[index].passwordHash = hashedPassword;
         users[index].isFirstLogin = true; 
-        users[index].updatedAt = new Date().toISOString();
+        users[index].updatedAt = nowIso;
+        users[index].passwordUpdatedAt = nowIso; // ⏱️ AJOUTÉ ICI POUR TON SYSTÈME DE SÉCURITÉ
 
-        const payloadToSave = { hotelId, users, updatedAt: new Date().toISOString() };
+        const payloadToSave = { hotelId, users, updatedAt: nowIso };
         await configDocRef.update(payloadToSave);
         saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
 
@@ -665,7 +674,7 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
         if (reqDocSnap.exists) {
             let requests = reqDocSnap.data().requests || [];
             requests = requests.filter(r => r.userId !== targetUserId);
-            const reqPayload = { requests, updatedAt: new Date().toISOString() };
+            const reqPayload = { requests, updatedAt: nowIso };
             await reqDocRef.set(reqPayload);
             saveToLocalMirror(hotelId, 'config', 'passwordRequests', reqPayload);
         }
