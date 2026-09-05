@@ -5,6 +5,8 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const fs = require('fs'); // <--- 1. Ajoute fs ici
 const path = require('path');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const serviceAccount = require('./serviceAccountKey.json');
@@ -18,6 +20,38 @@ if (getApps().length === 0) {
 
 const db = getFirestore();
 const app = express();
+
+app.use(helmet());
+app.use(
+  helmet.contentSecurityPolicy({
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "https://cdn.jsdelivr.net", "https://cdnjs.cloudflare.com"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: [
+        "'self'", 
+        "https://roomcheck-a24u.onrender.com", 
+        "https://roomcheck.centillion.online", 
+        "http://localhost:3000", 
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001"
+      ],
+    },
+  })
+);
+
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10, // Limite à 10 essais maximum par IP
+    message: {
+        success: false,
+        message: "Trop de tentatives de connexion échouées. Veuillez réessayer dans 15 minutes."
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
 
 // ==========================================
 // 🌟 2. SYSTÈMES DE MIROIR LOCAL (RC-LOCALDATA)
@@ -186,7 +220,7 @@ app.post('/api/register-hotel', async (req, res) => {
 });
 
 // ==========================================
-// 2. ROUTE UNIQUE DE LOGIN (Avec Miroir Local)
+// 2. ROUTE UNIQUE DE LOGIN (Avec Gestion d'Échecs & Verrouillage)
 // ==========================================
 app.post('/api/login', async (req, res) => {
     const { username, email, password } = req.body;
@@ -200,16 +234,18 @@ app.post('/api/login', async (req, res) => {
         const hotelsSnapshot = await db.collection('hotels').get();
         let foundUser = null;
         let foundHotel = null;
+        let userDocRef = null;
 
         for (const hotelDoc of hotelsSnapshot.docs) {
             const hotelId = hotelDoc.id;
             const hotelData = hotelDoc.data();
             
-            const configUserDoc = await hotelDoc.ref.collection('config').doc('users').get();
+            const configUserDocRef = hotelDoc.ref.collection('config').doc('users');
+            const configUserDoc = await configUserDocRef.get();
+            
             if (configUserDoc.exists) {
                 const configData = configUserDoc.data();
                 
-                // 🌟 Sauvegarde automatique dans le miroir local à chaque lecture cloud réussie
                 saveToLocalMirror(hotelId, 'config', 'users', configData);
                 saveToLocalMirror(hotelId, '_meta', 'info', hotelData);
 
@@ -225,6 +261,7 @@ app.post('/api/login', async (req, res) => {
                             ...targetInConfig
                         };
                         foundHotel = { id: hotelId, ...hotelData };
+                        userDocRef = configUserDocRef;
                         break;
                     }
                 }
@@ -233,7 +270,7 @@ app.post('/api/login', async (req, res) => {
 
         // --- MODE SECOURS LOCAL SI CLOUD INJOIGNABLE ---
         if (!foundUser) {
-            console.warn("⚠️ Cloud injoignable ou utilisateur introuvable, tentative de connexion via le miroir RC-LOCALDATA...");
+            console.warn("⚠️ Cloud injoignable ou utilisateur introuvable, tentative via le miroir RC-LOCALDATA...");
             const hotelsDir = path.join(LOCAL_DATA_ROOT, 'hotels');
             
             if (fs.existsSync(hotelsDir)) {
@@ -265,6 +302,36 @@ app.post('/api/login', async (req, res) => {
             return res.status(401).json({ success: false, message: 'Identifiant ou mot de passe incorrect.' });
         }
 
+        // ==========================================
+        // 🔒 GESTION DU BLOCAGE ET DES TENTATIVES
+        // ==========================================
+        const now = Date.now();
+        const loginAttempts = foundUser.loginAttempts || { count: 0, lockoutUntil: null, finalLockout: false };
+
+        // 1. Vérification si le compte est définitivement bloqué
+        if (loginAttempts.finalLockout) {
+            return res.status(403).json({
+                success: false,
+                message: "Compte bloqué suite à des échecs répétés. Veuillez demander une réinitialisation de votre mot de passe à votre administrateur."
+            });
+        }
+
+        // 2. Vérification si le compte est en pause temporaire (15 min)
+        if (loginAttempts.lockoutUntil && now < loginAttempts.lockoutUntil) {
+            const remainingMinutes = Math.ceil((loginAttempts.lockoutUntil - now) / (60 * 1000));
+            return res.status(429).json({
+                success: false,
+                message: `Trop de tentatives infructueuses. Compte temporairement verrouillé. Réessayez dans ${remainingMinutes} minute(s).`
+            });
+        } else if (loginAttempts.lockoutUntil && now >= loginAttempts.lockoutUntil) {
+            // La pause de 15 minutes est passée, on réinitialise pour donner les 3 dernières chances
+            loginAttempts.count = 5; // On considère qu'il a déjà consommé ses 5 premiers
+            loginAttempts.lockoutUntil = null;
+        }
+
+        // ==========================================
+        // 🔑 VÉRIFICATION DU MOT DE PASSE
+        // ==========================================
         const storedPassword = foundUser.passwordHash || foundUser.password || '';
         let isPasswordCorrect = false;
 
@@ -274,12 +341,48 @@ app.post('/api/login', async (req, res) => {
             isPasswordCorrect = (password.trim() === storedPassword);
         }
 
+        // --- SI LE MOT DE PASSE EST INCORRECT ---
         if (!isPasswordCorrect) {
-            return res.status(401).json({ success: false, message: 'Identifiant ou mot de passe incorrect.' });
+            loginAttempts.count += 1;
+
+            // Cas A : 5 échecs -> Première pause de 15 minutes
+            if (loginAttempts.count === 5) {
+                loginAttempts.lockoutUntil = now + (15 * 60 * 1000); // 15 minutes
+                await updateLoginAttemptsInDb(userDocRef, foundUser.id, loginAttempts, foundHotel.id);
+                return res.status(429).json({
+                    success: false,
+                    message: "Mot de passe incorrect. 5 tentatives atteintes : votre compte est verrouillé pendant 15 minutes."
+                });
+            }
+
+            // Cas B : Après la pause, 3 nouvelles chances (soit 8 échecs au total) -> Blocage définitif
+            if (loginAttempts.count >= 8) {
+                loginAttempts.finalLockout = true;
+                await updateLoginAttemptsInDb(userDocRef, foundUser.id, loginAttempts, foundHotel.id);
+                return res.status(403).json({
+                    success: false,
+                    message: "Trop d'échecs consécutifs après la période de pause. Votre compte est bloqué : veuillez demander une réinitialisation de votre mot de passe à votre administrateur."
+                });
+            }
+
+            // Cas C : Échec simple avant d'atteindre les paliers
+            await updateLoginAttemptsInDb(userDocRef, foundUser.id, loginAttempts, foundHotel.id);
+            const attemptsLeft = loginAttempts.count < 5 ? (5 - loginAttempts.count) : (8 - loginAttempts.count);
+            return res.status(401).json({
+                success: false,
+                message: `Identifiant ou mot de passe incorrect. Il vous reste ${attemptsLeft} tentative(s) avant verrouillage.`
+            });
         }
+
+        // --- SI LE CONNEXION EST RÉUSSIE : On remet les compteurs à zéro ---
+        loginAttempts.count = 0;
+        loginAttempts.lockoutUntil = null;
+        loginAttempts.finalLockout = false;
+        await updateLoginAttemptsInDb(userDocRef, foundUser.id, loginAttempts, foundHotel.id);
 
         delete foundUser.passwordHash;
         delete foundUser.password;
+        delete foundUser.loginAttempts;
 
         return res.json({
             success: true,
@@ -296,6 +399,30 @@ app.post('/api/login', async (req, res) => {
         return res.status(500).json({ success: false, message: 'Erreur interne du serveur lors de la connexion.' });
     }
 });
+
+// Fonction utilitaire pour sauvegarder l'état des tentatives dans Firestore et en local
+async function updateLoginAttemptsInDb(userDocRef, userId, loginAttemptsData, hotelId) {
+    if (!userDocRef) return;
+    try {
+        const docSnap = await userDocRef.get();
+        if (docSnap.exists) {
+            const data = docSnap.data();
+            if (Array.isArray(data.users)) {
+                data.users = data.users.map(u => {
+                    if ((u.id || u.uid || u.userId) === userId || u.email === userId || u.username === userId) {
+                        return { ...u, loginAttempts: loginAttemptsData };
+                    }
+                    return u;
+                });
+                data.updatedAt = new Date().toISOString();
+                await userDocRef.set(data);
+                saveToLocalMirror(hotelId, 'config', 'users', data);
+            }
+        }
+    } catch (e) {
+        console.error("Erreur mise à jour des tentatives de login:", e);
+    }
+}
 
 app.post('/api/admin/login', (req, res) => {
     req.url = '/api/login';
