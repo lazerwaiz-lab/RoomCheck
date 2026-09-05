@@ -43,11 +43,11 @@ app.use(
 );
 
 const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
+    windowMs: 5 * 60 * 1000, // ⏱️ 5 minutes
     max: 10, // Limite à 10 essais maximum par IP
     message: {
         success: false,
-        message: "Trop de tentatives de connexion échouées. Veuillez réessayer dans 15 minutes."
+        message: "Trop de tentatives de connexion échouées. Veuillez réessayer dans 5 minutes."
     },
     standardHeaders: true,
     legacyHeaders: false,
