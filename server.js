@@ -634,7 +634,7 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
             u.email === requesterId
         );
         
-        // 🛡️ Vérification robuste du rôle Superadmin
+        // 🛡️ Vérification robuste du rôle
         const rawRole = requester ? (requester.role || requester.roles || '') : '';
         const rolesArray = typeof rawRole === 'string' 
             ? rawRole.split(',').map(r => r.trim().toLowerCase()) 
@@ -657,12 +657,19 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
         const hashedPassword = await bcrypt.hash(newPassword.trim(), 10);
         const nowIso = new Date().toISOString();
 
-        // Mise à jour des informations de l'utilisateur ciblé
+        // Mise à jour des informations de l'utilisateur ciblé + Remise à zéro totale des tentatives de blocage
         users[index].password = hashedPassword;
         users[index].passwordHash = hashedPassword;
         users[index].isFirstLogin = true; 
         users[index].updatedAt = nowIso;
-        users[index].passwordUpdatedAt = nowIso; // ⏱️ AJOUTÉ ICI POUR TON SYSTÈME DE SÉCURITÉ
+        users[index].passwordUpdatedAt = nowIso;
+        
+        // 🔓 RÉINITIALISATION COMPLÈTE DES COMPTEURS DE SÉCURITÉ (Anti-Lockout)
+        users[index].loginAttempts = {
+            count: 0,
+            finalLockout: false,
+            lockoutUntil: null
+        };
 
         const payloadToSave = { hotelId, users, updatedAt: nowIso };
         await configDocRef.update(payloadToSave);
@@ -679,7 +686,7 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
             saveToLocalMirror(hotelId, 'config', 'passwordRequests', reqPayload);
         }
 
-        return res.json({ success: true, message: 'Mot de passe réinitialisé avec succès !' });
+        return res.json({ success: true, message: 'Mot de passe réinitialisé et compte débloqué avec succès !' });
     } catch (error) {
         console.error("Erreur reset-password:", error);
         return res.json({ success: false, message: 'Une erreur serveur est survenue.' });
