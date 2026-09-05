@@ -27,14 +27,13 @@ window.executeDbAction = async function executeDbAction(action, collectionName, 
         return { success: false, message: "Session invalide" };
     }
 
-    // Détection robuste : si on est en local
     const isLocal = window.location.hostname === 'localhost' || 
-                    window.location.hostname === '127.0.0.1' || 
-                    window.location.hostname === '';
+                window.location.hostname === '127.0.0.1' || 
+                window.location.hostname === '';
 
-    const baseUrl = isLocal
-        ? 'http://127.0.0.1:3000'
-        : 'https://friday-deleted-finish-inherited.trycloudflare.com';
+const baseUrl = isLocal
+    ? window.location.origin
+    : 'https://roomcheck-a24u.onrender.com';
 
     try {
         // 3. Choix dynamique de l'URL et du corps de la requête selon l'action

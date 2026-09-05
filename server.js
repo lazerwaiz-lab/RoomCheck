@@ -1,7 +1,9 @@
+process.env.TZ = 'Africa/Porto-Novo';
+
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
-const fs = require('fs');
+const fs = require('fs'); // <--- 1. Ajoute fs ici
 const path = require('path');
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
@@ -18,76 +20,29 @@ const db = getFirestore();
 const app = express();
 
 // ==========================================
-// 🌟 SYSTÈME DE MIROIR LOCAL COMPLET (RC-LOCALDATA)
+// 🌟 2. SYSTÈMES DE MIROIR LOCAL (RC-LOCALDATA)
 // ==========================================
-const LOCAL_DATA_ROOT = path.join(__dirname, 'RC-LOCALDATA');
+const LOCAL_DATA_ROOT = path.join('C:', 'Users', 'TEST.DESKTOP-VS19RSE.000', 'OneDrive', 'Documents', 'IT RoomCheck', 'room-checker-service', 'RC-LOCALDATA');
 
-// Fonction récursive pour tout aspirer d'un hôtel (documents et sous-collections)
-async function mirrorCompleteHotel(hotelId) {
-    try {
-        const hotelRef = db.collection('hotels').doc(hotelId);
-        const hotelDoc = await hotelRef.get();
-        
-        if (!hotelDoc.exists) return;
-
-        const hotelDir = path.join(LOCAL_DATA_ROOT, 'hotels', hotelId);
-        if (!fs.existsSync(hotelDir)) {
-            fs.mkdirSync(hotelDir, { recursive: true });
-        }
-
-        // 1. Sauvegarder les infos principales de l'hôtel
-        fs.writeFileSync(
-            path.join(hotelDir, '_hotel_info.json'), 
-            JSON.stringify({ id: hotelId, ...hotelDoc.data(), localUpdatedAt: new Date().toISOString() }, null, 2), 
-            'utf8'
-        );
-
-        // 2. Parcourir toutes les sous-collections du document hôtel (ex: config, bookings...)
-        const collections = await hotelRef.listCollections();
-        for (const collection of collections) {
-            const colName = collection.id;
-            const colDir = path.join(hotelDir, colName);
-            if (!fs.existsSync(colDir)) {
-                fs.mkdirSync(colDir, { recursive: true });
-            }
-
-            const snapshot = await collection.get();
-            for (const doc of snapshot.docs) {
-                const docId = doc.id;
-                const docData = doc.data();
-                
-                const docFilePath = path.join(colDir, `${docId}.json`);
-                fs.writeFileSync(
-                    docFilePath, 
-                    JSON.stringify({ id: docId, ...docData, localUpdatedAt: new Date().toISOString() }, null, 2), 
-                    'utf8'
-                );
-
-                // 3. Vérifier s'il y a des sous-collections dans les documents (ex: passwordRequests sous config)
-                const subCollections = await doc.ref.listCollections();
-                for (const subCol of subCollections) {
-                    const subColName = subCol.id;
-                    const subColDir = path.join(colDir, docId, subColName);
-                    if (!fs.existsSync(subColDir)) {
-                        fs.mkdirSync(subColDir, { recursive: true });
-                    }
-
-                    const subSnapshot = await subCol.get();
-                    for (const subDoc of subSnapshot.docs) {
-                        const subDocFilePath = path.join(subColDir, `${subDoc.id}.json`);
-                        fs.writeFileSync(
-                            subDocFilePath, 
-                            JSON.stringify({ id: subDoc.id, ...subDoc.data(), localUpdatedAt: new Date().toISOString() }, null, 2), 
-                            'utf8'
-                        );
-                    }
-                }
-            }
-        }
-        console.log(`[MIRROR] Miroir complet mis à jour avec succès pour l'hôtel : ${hotelId}`);
-    } catch (e) {
-        console.error("Erreur lors de la synchronisation miroir complète :", e);
+function saveToLocalMirror(hotelId, collectionName, docId, data) {
+    if (!hotelId || !collectionName) return;
+    const dirPath = path.join(LOCAL_DATA_ROOT, 'hotels', hotelId, collectionName);
+    if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
     }
+    const fileName = docId ? `${docId}.json` : `_collection.json`;
+    const filePath = path.join(dirPath, fileName);
+    
+    let fileData = {};
+    if (fs.existsSync(filePath)) {
+        try { fileData = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (e) { fileData = {}; }
+    }
+    if (docId) {
+        fileData = { ...fileData, ...data, id: docId, localUpdatedAt: new Date().toISOString() };
+    } else {
+        fileData = data;
+    }
+    fs.writeFileSync(filePath, JSON.stringify(fileData, null, 2), 'utf8');
 }
 
 function readFromLocalMirror(hotelId, collectionName, docId) {
@@ -213,8 +168,9 @@ app.post('/api/register-hotel', async (req, res) => {
             updatedAt: new Date().toISOString()
         });
 
-        // 🌟 3. DÉCLENCHEMENT DU MIROIR COMPLET AUTOMATIQUE
-        await mirrorCompleteHotel(hotelId);
+        // 🌟 3. SAUVEGARDE DANS LE DOSSIER LOCAL RC-LOCALDATA AUTOMATIQUE
+        saveToLocalMirror(hotelId, 'config', 'users', { hotelId, users: [creatorAdminUser] });
+        saveToLocalMirror(hotelId, '_meta', 'info', { name: cleanName, hotelId });
 
         return res.json({
             success: true,
@@ -404,20 +360,11 @@ app.post('/api/admin/users', async (req, res) => {
         }
 
         const configDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('users');
-        let docSnap;
-        let currentUsers = [];
+        const docSnap = await configDocRef.get();
 
-        try {
-            docSnap = await configDocRef.get();
-            if (docSnap.exists) {
-                currentUsers = docSnap.data().users || [];
-            }
-        } catch (cloudErr) {
-            console.warn('⚠️ Cloud injoignable pour la lecture, tentative via le miroir local...');
-            const localData = readFromLocalMirror(hotelId, 'config', 'users');
-            if (localData && Array.isArray(localData.users)) {
-                currentUsers = localData.users;
-            }
+        let currentUsers = [];
+        if (docSnap.exists) {
+            currentUsers = docSnap.data().users || [];
         }
 
         const cleanUsername = username.trim().toLowerCase();
@@ -451,12 +398,7 @@ app.post('/api/admin/users', async (req, res) => {
             updatedAt: new Date().toISOString()
         };
 
-        // Essai d'écriture Cloud avec repli local si échec
-        try {
-            await configDocRef.set(payloadToSave, { merge: true });
-        } catch (cloudWriteErr) {
-            console.warn('⚠️ Écriture Cloud impossible, sauvegarde effectuée uniquement dans le miroir local (Mode Hors-ligne).');
-        }
+        await configDocRef.set(payloadToSave, { merge: true });
 
         // 🌟 Sauvegarde immédiate dans le miroir local RC-LOCALDATA
         saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
@@ -486,21 +428,13 @@ app.put('/api/admin/users/:id', async (req, res) => {
 
     try {
         const configDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('users');
-        let docSnap;
-        let users = [];
+        const docSnap = await configDocRef.get();
 
-        try {
-            docSnap = await configDocRef.get();
-            if (docSnap.exists) {
-                users = docSnap.data().users || [];
-            }
-        } catch (cloudErr) {
-            const localData = readFromLocalMirror(hotelId, 'config', 'users');
-            if (localData && Array.isArray(localData.users)) {
-                users = localData.users;
-            }
+        if (!docSnap.exists) {
+            return res.status(404).json({ success: false, message: 'Dossier utilisateurs introuvable.' });
         }
 
+        let users = docSnap.data().users || [];
         const index = users.findIndex(u => u.id === userId);
 
         if (index === -1) {
@@ -517,12 +451,7 @@ app.put('/api/admin/users/:id', async (req, res) => {
         };
 
         const payloadToSave = { hotelId, users, updatedAt: new Date().toISOString() };
-        
-        try {
-            await configDocRef.update(payloadToSave);
-        } catch (cloudUpdateErr) {
-            console.warn('⚠️ Mise à jour Cloud échouée, sauvegarde locale effectuée.');
-        }
+        await configDocRef.update(payloadToSave);
 
         // 🌟 Synchro miroir local
         saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
@@ -571,7 +500,16 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
         let users = docSnap.data().users || [];
 
         const requester = users.find(u => u.id === requesterId || u.username === requesterId);
-        if (!requester || (requester.role || '').toLowerCase() !== 'superadmin') {
+        
+        // 🛡️ Vérification robuste du rôle Superadmin (gère les chaînes avec virgules et les tableaux)
+        const rawRole = requester ? (requester.role || requester.roles || '') : '';
+        const rolesArray = typeof rawRole === 'string' 
+            ? rawRole.split(',').map(r => r.trim().toLowerCase()) 
+            : Array.isArray(rawRole) ? rawRole.map(r => String(r).trim().toLowerCase()) : [];
+        
+        const isRequesterSuperAdmin = rolesArray.includes('superadmin');
+
+        if (!requester || !isRequesterSuperAdmin) {
             return res.json({ 
                 success: false, 
                 message: "Vous n'êtes pas autorisé à modifier les mots de passe." 
@@ -1392,7 +1330,20 @@ app.post('/api/admin/config/departement', verifierPermissionServeur, async (req,
 // ROUTE GÉNÉRIQUE EXÉCUTION ACTIONS DB (Avec Miroir & Fallback)
 // ==========================================
 app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) => {
-    const { action, collectionName, docId, dataPayload } = req.body;
+    console.log("📥 Requête reçue sur /api/execute-db-action - Body complet :", req.body);
+
+    const { action, collectionName, docId } = req.body;
+    
+    // Récupération ultra tolérante du payload (qu'il soit structuré dans dataPayload ou envoyé directement à plat)
+    const dataPayload = req.body.dataPayload || (() => {
+        const copy = { ...req.body };
+        delete copy.action;
+        delete copy.collectionName;
+        delete copy.docId;
+        delete copy.hotelId;
+        return copy;
+    })();
+
     const hotelId = req.targetHotelId || req.body.hotelId;
 
     if (action === 'GET_PASSWORD_REQUESTS') {
@@ -1493,6 +1444,7 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
     }
 
     if (!action || !collectionName || !hotelId) {
+        console.warn("⚠️ Paramètres manquants détectés :", { action, collectionName, hotelId });
         return res.status(400).json({ success: false, message: "Champs action, collectionName et hotelId requis." });
     }
 
@@ -1505,19 +1457,32 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
 
         if (action === 'DELETE') {
             await collectionRef.doc(docId).delete();
+            
+            // Miroir local : Sauvegarde de la suppression (ou suppression du fichier miroir associé)
+            if (typeof deleteFromLocalMirror === 'function') {
+                deleteFromLocalMirror(hotelId, collectionName, docId);
+            } else {
+                saveToLocalMirror(hotelId, collectionName, docId, { deleted: true, deletedAt: new Date().toISOString() });
+            }
+
             return res.json({ success: true, message: "Suppression effectuée avec succès." });
         } 
         else if (action === 'UPDATE') {
             await collectionRef.doc(docId).set(dataPayload || {}, { merge: true });
+            
+            // Miroir local : Sauvegarde de la mise à jour
+            saveToLocalMirror(hotelId, collectionName, docId, dataPayload);
+
             return res.json({ success: true, message: "Mise à jour effectuée avec succès." });
         }
         else if (action === 'CREATE') {
-            const now = new Date();
-            const timestamp = now.toISOString().replace(/[:.]/g, '-');
-            const customDocId = `ticket_${timestamp}`;
+            const finalDocId = docId || `doc_${Date.now()}`;
+            await collectionRef.doc(finalDocId).set(dataPayload || {});
+            
+            // Miroir local : Sauvegarde de la création
+            saveToLocalMirror(hotelId, collectionName, finalDocId, dataPayload);
 
-            await collectionRef.doc(customDocId).set(dataPayload || {});
-            return res.json({ success: true, message: "Création effectuée avec succès.", docId: customDocId });
+            return res.json({ success: true, message: "Création effectuée avec succès.", docId: finalDocId });
         }
 
         return res.status(400).json({ success: false, message: "Action non reconnue." });
@@ -1526,31 +1491,20 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
         return res.status(500).json({ success: false, message: "Erreur serveur lors de l'opération." });
     }
 });
-// ==========================================
-// RÉCUPÉRATION D'UN HÔTEL (Avec Miroir & Fallback)
-// ==========================================
+// Récupérer les informations d'un hôtel par son ID
 app.get('/api/hotels/:id', async (req, res) => {
-    const hotelId = req.params.id;
     try {
-        const doc = await db.collection('hotels').doc(hotelId).get();
+        const doc = await db.collection('hotels').doc(req.params.id).get();
         if (!doc.exists) {
-            // Secours miroir local
-            const localData = readFromLocalMirror(hotelId, '_meta', 'info');
-            if (localData) return res.json({ id: hotelId, ...localData, source: 'RC-LOCALDATA-OFFLINE' });
             return res.status(404).json({ message: "Hôtel introuvable" });
         }
-        const data = doc.data();
-        saveToLocalMirror(hotelId, '_meta', 'info', data);
-        res.json({ id: doc.id, ...data });
+        res.json({ id: doc.id, ...doc.data() });
     } catch (error) {
-        const localData = readFromLocalMirror(hotelId, '_meta', 'info');
-        if (localData) return res.json({ id: hotelId, ...localData, source: 'RC-LOCALDATA-OFFLINE' });
         res.status(500).json({ error: error.message });
     }
 });
-
 // ==========================================
-// MISE À JOUR DU PREMIER MOT DE PASSE (Avec Synchro Miroir)
+// MISE À JOUR DU PREMIER MOT DE PASSE (Compatible config/users)
 // ==========================================
 app.post('/api/admin/users/update-first-login-password', async (req, res) => {
     try {
@@ -1561,28 +1515,15 @@ app.post('/api/admin/users/update-first-login-password', async (req, res) => {
         }
 
         const configDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('users');
-        let docSnap;
-        let users = [];
+        const docSnap = await configDocRef.get();
 
-        try {
-            docSnap = await configDocRef.get();
-            if (docSnap.exists) {
-                users = docSnap.data().users || [];
-                saveToLocalMirror(hotelId, 'config', 'users', docSnap.data());
-            }
-        } catch (cloudErr) {
-            console.warn("⚠️ Cloud injoignable, lecture du miroir local pour l'authentification...");
-            const localData = readFromLocalMirror(hotelId, 'config', 'users');
-            if (localData && Array.isArray(localData.users)) {
-                users = localData.users;
-            }
-        }
-
-        if (users.length === 0) {
+        if (!docSnap.exists) {
             return res.status(404).json({ success: false, message: "Dossier utilisateurs introuvable." });
         }
 
+        let users = docSnap.data().users || [];
         const index = users.findIndex(u => u.id === userId);
+
         if (index === -1) {
             return res.status(404).json({ success: false, message: "Utilisateur introuvable." });
         }
@@ -1590,6 +1531,7 @@ app.post('/api/admin/users/update-first-login-password', async (req, res) => {
         const targetUser = users[index];
         const pwdToCompare = targetUser.password || targetUser.passwordHash || '';
 
+        // 🛡️ Vérification sécurisée de l'ancien mot de passe via bcrypt
         let isOldPasswordValid = false;
         if (typeof bcrypt !== 'undefined' && bcrypt.compareSync) {
             isOldPasswordValid = bcrypt.compareSync(oldPassword, pwdToCompare);
@@ -1601,10 +1543,12 @@ app.post('/api/admin/users/update-first-login-password', async (req, res) => {
             return res.status(400).json({ success: false, message: "L'ancien mot de passe est incorrect." });
         }
 
+        // 🛑 Empêcher l'utilisateur de remettre exactement le même mot de passe
         if (oldPassword === newPassword.trim()) {
             return res.status(400).json({ success: false, message: "Le nouveau mot de passe doit être différent de l'ancien." });
         }
 
+        // Hachage sécurisé du nouveau mot de passe
         const hashedPassword = await bcrypt.hash(newPassword.trim(), 10);
 
         users[index] = {
@@ -1616,104 +1560,76 @@ app.post('/api/admin/users/update-first-login-password', async (req, res) => {
             updatedAt: new Date().toISOString()
         };
 
-        const payloadToSave = {
-            hotelId,
-            users,
-            updatedAt: new Date().toISOString()
-        };
-
-        try {
-            await configDocRef.set(payloadToSave, { merge: true });
-        } catch (dbErr) {
-            console.warn("⚠️ Écriture Firestore échouée, mise à jour enregistrée uniquement dans le miroir local.");
-        }
-
-        // 🌟 Mise à jour immédiate du miroir local
-        saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
+        await configDocRef.update({ users, updatedAt: new Date().toISOString() });
 
         return res.json({ success: true, message: "Mot de passe mis à jour avec succès." });
 
     } catch (error) {
+        // 🔒 Log neutre pour ne laisser aucune trace exploitable par un hacker
         console.error("Erreur de sécurité lors du traitement du mot de passe.");
         return res.status(500).json({ success: false, message: "Erreur serveur interne." });
     }
 });
-
-// ==========================================
-// RÉCUPÉRATION DES RÉSERVATIONS (Avec Miroir & Fallback)
-// ==========================================
+// Route Express pour récupérer les réservations d'un hôtel de manière sécurisée
 app.get('/api/hotels/:hotelId/bookings', async (req, res) => {
     try {
         const { hotelId } = req.params;
         const userId = req.headers['x-user-id'];
 
+        // Optionnel : Vérification de sécurité avec le userId si nécessaire
         if (!userId) {
             return res.status(401).json({ error: "Utilisateur non authentifié." });
         }
 
+        // Récupération dynamique depuis la sous-collection Firestore
         const bookingsRef = db.collection('hotels').doc(hotelId).collection('bookings');
-        let snapshot;
-        let bookings = [];
-        let isOfflineMode = false;
+        const snapshot = await bookingsRef.get();
 
-        try {
-            snapshot = await bookingsRef.get();
-            const batch = db.batch();
-            let hasChanges = false;
-            const now = new Date();
+        const bookings = [];
+        const batch = db.batch(); // Permet de grouper les modifications Firestore pour optimiser
+        let hasChanges = false;
+        const now = new Date(); // Heure actuelle du serveur
 
-            snapshot.forEach(doc => {
-                const data = doc.data();
-                let currentStatus = data.status || 'RÉSERVÉE';
-                let calculatedStatus = currentStatus;
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            let currentStatus = data.status || 'RÉSERVÉE';
+            let calculatedStatus = currentStatus;
 
-                const checkIn = data.checkIn ? new Date(data.checkIn) : null;
-                const checkOut = data.checkOut ? new Date(data.checkOut) : null;
+            // On s'assure d'avoir les dates de check-in et check-out valides
+            const checkIn = data.checkIn ? new Date(data.checkIn) : null;
+            const checkOut = data.checkOut ? new Date(data.checkOut) : null;
 
-                if (checkIn && checkOut && !isNaN(checkIn) && !isNaN(checkOut)) {
-                    if (now > checkOut) {
-                        calculatedStatus = 'TERMINÉE';
-                    } else if (now >= checkIn && now <= checkOut) {
-                        calculatedStatus = 'OCCUPÉE';
-                    } else if (now < checkIn) {
-                        if (currentStatus !== 'ANNULÉE') {
-                            calculatedStatus = 'RÉSERVÉE';
-                        }
-                    }
-
-                    if (calculatedStatus !== currentStatus) {
-                        hasChanges = true;
-                        batch.update(doc.ref, { status: calculatedStatus });
-                        data.status = calculatedStatus;
+            if (checkIn && checkOut && !isNaN(checkIn) && !isNaN(checkOut)) {
+                // Logique intelligente d'évolution du statut en fonction du temps
+                if (now > checkOut) {
+                    calculatedStatus = 'TERMINÉE';
+                } else if (now >= checkIn && now <= checkOut) {
+                    calculatedStatus = 'OCCUPÉE';
+                } else if (now < checkIn) {
+                    // Si on est avant la date de check-in, on garde 'RÉSERVÉE' 
+                    // (sauf si un autre statut manuel spécifique existe)
+                    if (currentStatus !== 'ANNULÉE') {
+                        calculatedStatus = 'RÉSERVÉE';
                     }
                 }
 
-                bookings.push({
-                    id: doc.id,
-                    ...data
-                });
+                // Si le statut calculé diffère de celui enregistré dans Firestore, on met à jour
+                if (calculatedStatus !== currentStatus) {
+                    hasChanges = true;
+                    batch.update(doc.ref, { status: calculatedStatus });
+                    data.status = calculatedStatus; // Met à jour l'objet renvoyé immédiatement
+                }
+            }
+
+            bookings.push({
+                id: doc.id,
+                ...data
             });
+        });
 
-            if (hasChanges) {
-                await batch.commit().catch(() => {});
-            }
-
-            // 🌟 Sauvegarde miroir globale des réservations
-            saveToLocalMirror(hotelId, 'bookings', 'all_bookings', { bookings });
-
-        } catch (cloudErr) {
-            console.warn("⚠️ Cloud injoignable pour les réservations, chargement du miroir local RC-LOCALDATA...");
-            isOfflineMode = true;
-            const localBookingData = readFromLocalMirror(hotelId, 'bookings', 'all_bookings');
-            if (localBookingData && Array.isArray(localBookingData.bookings)) {
-                bookings = localBookingData.bookings;
-            } else {
-                return res.status(500).json({ error: "Erreur interne et aucune donnée de réservation locale disponible." });
-            }
-        }
-
-        if (isOfflineMode) {
-            return res.status(200).json({ bookings, source: 'RC-LOCALDATA-OFFLINE' });
+        // Si des statuts ont évolué avec le temps, on valide les modifications dans Firestore
+        if (hasChanges) {
+            await batch.commit();
         }
 
         res.status(200).json(bookings);
@@ -1722,7 +1638,6 @@ app.get('/api/hotels/:hotelId/bookings', async (req, res) => {
         res.status(500).json({ error: "Erreur interne du serveur." });
     }
 });
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 Serveur API Room Check démarré sur le port ${PORT}`);
