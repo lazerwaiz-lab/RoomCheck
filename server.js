@@ -5,6 +5,8 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const fs = require('fs'); // <--- 1. Ajoute fs ici
 const path = require('path');
+const crypto = require('crypto');
+
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
@@ -21,23 +23,33 @@ if (getApps().length === 0) {
 const db = getFirestore();
 const app = express();
 
-app.use(helmet());
 app.use(
   helmet.contentSecurityPolicy({
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "https://cdn.jsdelivr.net", "https://cdnjs.cloudflare.com"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com"],
+      scriptSrc: [
+        "'self'", 
+        "'unsafe-inline'", 
+        "https://cdn.jsdelivr.net", 
+        "https://cdnjs.cloudflare.com", 
+        "https://www.gstatic.com" // <--- Ajoutez ceci ici
+      ],
+      scriptSrcAttr: ["'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com", "https://cdnjs.cloudflare.com"],
       imgSrc: ["'self'", "data:", "https:"],
       connectSrc: [
-        "'self'", 
-        "https://roomcheck-a24u.onrender.com", 
-        "https://roomcheck.centillion.online", 
-        "http://localhost:3000", 
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001"
-      ],
+  "'self'", 
+  "https://roomcheck-a24u.onrender.com", 
+  "https://roomcheck.centillion.online", 
+  "http://localhost:3000", 
+  "http://127.0.0.1:3000",
+  "http://localhost:3001",
+  "http://127.0.0.1:3001",
+  "https://firestore.googleapis.com",       // <--- Ajoutez ceci
+  "https://*.firestore.googleapis.com",     // <--- Et ceci
+  "https://*.googleapis.com"                // <--- Et ceci pour être sûr
+]
     },
   })
 );
@@ -375,24 +387,53 @@ app.post('/api/login', async (req, res) => {
         }
 
         // --- SI LE CONNEXION EST RÉUSSIE : On remet les compteurs à zéro ---
-        loginAttempts.count = 0;
-        loginAttempts.lockoutUntil = null;
-        loginAttempts.finalLockout = false;
-        await updateLoginAttemptsInDb(userDocRef, foundUser.id, loginAttempts, foundHotel.id);
+loginAttempts.count = 0;
+loginAttempts.lockoutUntil = null;
+loginAttempts.finalLockout = false;
+await updateLoginAttemptsInDb(userDocRef, foundUser.id, loginAttempts, foundHotel.id);
 
-        delete foundUser.passwordHash;
-        delete foundUser.password;
-        delete foundUser.loginAttempts;
+delete foundUser.passwordHash;
+delete foundUser.password;
+delete foundUser.loginAttempts;
 
-        return res.json({
-            success: true,
-            mustChangePassword: foundUser.isFirstLogin === true,
-            user: foundUser,
-            hotel: {
-                id: foundHotel.id,
-                name: foundHotel.name || 'Hôtel'
-            }
-        });
+// 🔐 Génération du jeton sécurisé infalsifiable lié à cette session
+const sessionToken = crypto.randomBytes(32).toString('hex');
+
+// On injecte le token directement dans l'objet utilisateur avant de l'enregistrer dans Firestore
+foundUser.sessionToken = sessionToken;
+
+// Récupération de tous les utilisateurs du document pour mettre à jour le tableau
+const userDocSnap = await userDocRef.get();
+if (userDocSnap.exists) {
+    const data = userDocSnap.data();
+    let usersArray = data.users || [];
+
+    // On met à jour l'utilisateur spécifique dans le tableau avec son nouveau token
+    usersArray = usersArray.map(u => {
+        if (u.id === foundUser.id) {
+            return { ...u, sessionToken: sessionToken };
+        }
+        return u;
+    });
+
+    // Sauvegarde persistante directement dans le document de l'hôtel
+    await userDocRef.update({ users: usersArray });
+}
+
+delete foundUser.passwordHash;
+delete foundUser.password;
+delete foundUser.loginAttempts;
+
+return res.json({
+    success: true,
+    token: sessionToken, // On envoie le token au client
+    mustChangePassword: foundUser.isFirstLogin === true,
+    user: foundUser,
+    hotel: {
+        id: foundHotel.id,
+        name: foundHotel.name || 'Hôtel'
+    }
+});
 
     } catch (error) {
         console.error('Erreur Critique Login:', error);
@@ -1319,13 +1360,27 @@ async function verifierPermissionServeur(req, res, next) {
                 ? requiredRole.map(r => String(r).trim().toLowerCase()) 
                 : [String(requiredRole).trim().toLowerCase()];
 
-            const allowed = requiredArray.some(reqR => realUserRolesList.includes(reqR));
+            const isCashierRequired = requiredArray.some(r => r === 'f&b cashier');
+            const isManagerRequired = requiredArray.some(r => r === 'f&b manager');
+
+            let allowed = false;
+
+            const hasCashier = realUserRolesList.includes('f&b cashier');
+            const hasManager = realUserRolesList.includes('f&b manager');
+
+            if (isCashierRequired) {
+                allowed = hasCashier;
+            } else if (isManagerRequired) {
+                allowed = hasManager && !hasCashier;
+            } else {
+                allowed = requiredArray.some(reqR => realUserRolesList.includes(reqR));
+            }
 
             if (!allowed) {
                 return res.json({ 
                     success: false, 
                     code: 403,
-                    message: "Accès refusé." 
+                    message: "Accès refusé pour ce profil." 
                 });
             }
         }
@@ -1601,7 +1656,6 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
         if (action === 'DELETE') {
             await collectionRef.doc(docId).delete();
             
-            // Miroir local : Sauvegarde de la suppression (ou suppression du fichier miroir associé)
             if (typeof deleteFromLocalMirror === 'function') {
                 deleteFromLocalMirror(hotelId, collectionName, docId);
             } else {
@@ -1613,16 +1667,42 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
         else if (action === 'UPDATE') {
             await collectionRef.doc(docId).set(dataPayload || {}, { merge: true });
             
-            // Miroir local : Sauvegarde de la mise à jour
             saveToLocalMirror(hotelId, collectionName, docId, dataPayload);
 
             return res.json({ success: true, message: "Mise à jour effectuée avec succès." });
+        }
+
+        else if (action === 'SET') {
+            const finalDocId = docId || `doc_${Date.now()}`;
+            await collectionRef.doc(finalDocId).set(dataPayload || {}, { merge: true });
+            
+            saveToLocalMirror(hotelId, collectionName, finalDocId, dataPayload);
+
+            return res.json({ success: true, message: "Enregistrement (SET) effectué avec succès.", docId: finalDocId });
+        }
+        else if (action === 'GET') {
+            if (docId) {
+                const docSnap = await collectionRef.doc(docId).get();
+                if (!docSnap.exists) {
+                    return res.json({ success: true, data: null });
+                }
+                const docData = { id: docSnap.id, ...docSnap.data() };
+                saveToLocalMirror(hotelId, collectionName, docId, docData);
+                return res.json({ success: true, data: docData });
+            } else {
+                const snapshot = await collectionRef.get();
+                const documents = {};
+                snapshot.forEach(doc => {
+                    documents[doc.id] = doc.data();
+                });
+                saveToLocalMirror(hotelId, collectionName, '_all', documents);
+                return res.json({ success: true, data: documents });
+            }
         }
         else if (action === 'CREATE') {
             const finalDocId = docId || `doc_${Date.now()}`;
             await collectionRef.doc(finalDocId).set(dataPayload || {});
             
-            // Miroir local : Sauvegarde de la création
             saveToLocalMirror(hotelId, collectionName, finalDocId, dataPayload);
 
             return res.json({ success: true, message: "Création effectuée avec succès.", docId: finalDocId });
@@ -1781,6 +1861,55 @@ app.get('/api/hotels/:hotelId/bookings', async (req, res) => {
         res.status(500).json({ error: "Erreur interne du serveur." });
     }
 });
+
+app.post('/api/verify-session', async (req, res) => {
+    try {
+        const { token } = req.body;
+        
+        if (!token) {
+            return res.json({ valid: false, message: "Token manquant." });
+        }
+
+        // On parcourt les hôtels pour trouver l'utilisateur qui possède ce sessionToken
+        const hotelsSnapshot = await db.collection('hotels').get();
+        let matchedUser = null;
+        let matchedHotelId = null;
+
+        for (const hotelDoc of hotelsSnapshot.docs) {
+            const userDoc = await db.collection('hotels')
+                .doc(hotelDoc.id)
+                .collection('config')
+                .doc('users')
+                .get();
+
+            if (userDoc.exists) {
+                const data = userDoc.data();
+                const usersArray = data.users || [];
+                const found = usersArray.find(u => u.sessionToken === token);
+                if (found) {
+                    matchedUser = found;
+                    matchedHotelId = hotelDoc.id;
+                    break;
+                }
+            }
+        }
+
+        if (!matchedUser) {
+            return res.json({ valid: false, message: "Session introuvable ou expirée." });
+        }
+
+        return res.json({ 
+            valid: true, 
+            role: matchedUser.role,
+            user: matchedUser 
+        });
+    } catch (error) {
+        console.error("Erreur verify-session:", error);
+        return res.status(500).json({ valid: false, error: error.message });
+    }
+});
+
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 Serveur API Room Check démarré sur le port ${PORT}`);

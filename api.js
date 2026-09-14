@@ -31,8 +31,9 @@ window.executeDbAction = async function executeDbAction(action, collectionName, 
                 window.location.hostname === '127.0.0.1' || 
                 window.location.hostname === '';
 
+// Si on est en local, on force l'API à pointer sur le port 3000 de votre serveur Node.js
 const baseUrl = isLocal
-    ? window.location.origin
+    ? 'http://localhost:3000' 
     : 'https://roomcheck-a24u.onrender.com';
 
     try {
