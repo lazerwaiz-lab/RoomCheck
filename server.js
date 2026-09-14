@@ -40,7 +40,7 @@ app.use(
       imgSrc: ["'self'", "data:", "https:"],
       connectSrc: [
   "'self'", 
-  "https://roomcheck-a24u.onrender.com", 
+  "https://roomcheck-1.onrender.com", 
   "https://roomcheck.centillion.online", 
   "http://localhost:3000", 
   "http://127.0.0.1:3000",
@@ -111,7 +111,7 @@ const allowedOrigins = [
     'http://localhost:3001',
     'http://127.0.0.1:3001',
     'https://roomcheck.centillion.online',
-    'https://roomcheck-a24u.onrender.com'
+    'https://roomcheck-1.onrender.com'
 ];
 
 app.use(cors({
