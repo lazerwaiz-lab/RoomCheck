@@ -1360,18 +1360,20 @@ async function verifierPermissionServeur(req, res, next) {
                 ? requiredRole.map(r => String(r).trim().toLowerCase()) 
                 : [String(requiredRole).trim().toLowerCase()];
 
-            const isCashierRequired = requiredArray.some(r => r === 'f&b cashier');
-            const isManagerRequired = requiredArray.some(r => r === 'f&b manager');
-
             let allowed = false;
 
             const hasCashier = realUserRolesList.includes('f&b cashier');
             const hasManager = realUserRolesList.includes('f&b manager');
 
-            if (isCashierRequired) {
+            const isCashierRequired = requiredArray.some(r => r === 'f&b cashier');
+            const isManagerRequired = requiredArray.some(r => r === 'f&b manager');
+
+            if (isCashierRequired && isManagerRequired) {
+                allowed = hasCashier || hasManager;
+            } else if (isCashierRequired) {
                 allowed = hasCashier;
             } else if (isManagerRequired) {
-                allowed = hasManager && !hasCashier;
+                allowed = hasManager;
             } else {
                 allowed = requiredArray.some(reqR => realUserRolesList.includes(reqR));
             }
