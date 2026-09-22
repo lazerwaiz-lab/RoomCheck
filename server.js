@@ -26,17 +26,17 @@ const app = express();
 
 // ✉️ Configuration du transporteur SMTP pour noreply@centillion.online
 const transporter = nodemailer.createTransport({
-    host: 'mail.centillion.online',
-    port: 465,
-    secure: true, // Vrai pour le port 465 (SSL direct)
+    host: 'smtp-relay.brevo.com',
+    port: 587,
+    secure: false,
     auth: {
-        user: 'noreply@centillion.online',
-        pass: '@Centillion1'
+        user: 'baa4d9001@smtp-brevo.com',
+        pass: process.env.BREVO_SMTP_PASS // <-- Sécurisé par variable d'environnement
     },
     tls: {
         rejectUnauthorized: false
     },
-    connectionTimeout: 20000, // 20 secondes pour laisser le temps à Render
+    connectionTimeout: 20000,
     greetingTimeout: 20000,
     socketTimeout: 20000
 });
