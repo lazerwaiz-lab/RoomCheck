@@ -26,16 +26,19 @@ const app = express();
 
 // ✉️ Configuration du transporteur SMTP pour noreply@centillion.online
 const transporter = nodemailer.createTransport({
-    host: 'mail.centillion.online', // L'hôte exact relevé sur ton webmail[cite: 8]
-    port: 587,                    // Port 587 indiqué sur ton webmail[cite: 8]
-    secure: false,                 // false obligatoire pour le port 587 en TLS
+    host: 'mail.centillion.online',
+    port: 465,
+    secure: true, // Vrai pour le port 465 (SSL direct)
     auth: {
         user: 'noreply@centillion.online',
         pass: '@Centillion1'
     },
     tls: {
-        rejectUnauthorized: false // Évite les blocages de certificat en local
-    }
+        rejectUnauthorized: false
+    },
+    connectionTimeout: 20000, // 20 secondes pour laisser le temps à Render
+    greetingTimeout: 20000,
+    socketTimeout: 20000
 });
 
 app.use(
