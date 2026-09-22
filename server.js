@@ -1397,7 +1397,7 @@ app.post('/api/public-action', async (req, res) => {
             const resetLink = `${frontendBaseUrl}/login.html?reset=true&token=${resetToken}&hotelId=${targetHotelId}`;
 
             // 🚀 Envoi de l'e-mail via l'API HTTP de Brevo (Port 443 - Non bloqué par Render) avec ton template d'origine
-            const userName = user.fullName || user.username || 'Utilisateur';
+            const userName = matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim() || matchedUser.username || 'Utilisateur';
 
             const htmlContent = `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
@@ -1470,7 +1470,8 @@ app.post('/api/public-action', async (req, res) => {
 
             if (!brevoResponse.ok) {
                 const errorData = await brevoResponse.json();
-                throw new Error(`Erreur API Brevo: ${JSON.stringify(errorData)}`);
+                console.error(`[REQUEST_PASSWORD_RESET] Erreur API Brevo:`, errorData);
+                return res.status(500).json({ success: false, message: "Échec de l'envoi de l'e-mail de réinitialisation." });
             }
 
             console.log(`[REQUEST_PASSWORD_RESET] E-mail de réinitialisation envoyé avec succès via l'API Brevo à : ${userIdentifier}`);
