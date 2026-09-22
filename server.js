@@ -1336,60 +1336,58 @@ app.post('/api/public-action', async (req, res) => {
             }
 
             const crypto = require('crypto');
-const resetToken = crypto.randomBytes(32).toString('hex');
-const tokenExpiration = Date.now() + 300000; // +5 minutes
+            const resetToken = crypto.randomBytes(32).toString('hex');
+            const tokenExpiration = Date.now() + 300000; // +5 minutes
 
-// 1. Enregistrement pour la vérification du token (passwordResets)
-const resetDocRef = db.collection('hotels').doc(targetHotelId).collection('config').doc('passwordResets');
-const resetDocSnap = await resetDocRef.get();
-let resets = resetDocSnap.exists ? (resetDocSnap.data().resets || []) : [];
+            // 1. Enregistrement pour la vérification du token (passwordResets)
+            const resetDocRef = db.collection('hotels').doc(targetHotelId).collection('config').doc('passwordResets');
+            const resetDocSnap = await resetDocRef.get();
+            let resets = resetDocSnap.exists ? (resetDocSnap.data().resets || []) : [];
 
-resets = resets.filter(r => r.userId !== primaryUserId);
-resets.push({
-    userId: primaryUserId,
-    email: userIdentifier,
-    token: resetToken,
-    expiresAt: tokenExpiration,
-    createdAt: new Date().toISOString()
-});
-await resetDocRef.set({ resets, updatedAt: new Date().toISOString() });
-saveToLocalMirror(targetHotelId, 'config', 'passwordResets', { resets });
-console.log(`[REQUEST_PASSWORD_RESET] Token de réinitialisation enregistré pour l'utilisateur ID: ${primaryUserId}`);
+            resets = resets.filter(r => r.userId !== primaryUserId);
+            resets.push({
+                userId: primaryUserId,
+                email: userIdentifier,
+                token: resetToken,
+                expiresAt: tokenExpiration,
+                createdAt: new Date().toISOString()
+            });
+            await resetDocRef.set({ resets, updatedAt: new Date().toISOString() });
+            saveToLocalMirror(targetHotelId, 'config', 'passwordResets', { resets });
+            console.log(`[REQUEST_PASSWORD_RESET] Token de réinitialisation enregistré pour l'utilisateur ID: ${primaryUserId}`);
 
-// 2. Enregistrement pour la notification admin (passwordRequests)
-const reqDocRef = db.collection('hotels').doc(targetHotelId).collection('config').doc('passwordRequests');
-const reqDocSnap = await reqDocRef.get();
-let requests = reqDocSnap.exists ? (reqDocSnap.data().requests || []) : [];
+            // 2. Enregistrement pour la notification admin (passwordRequests)
+            const reqDocRef = db.collection('hotels').doc(targetHotelId).collection('config').doc('passwordRequests');
+            const reqDocSnap = await reqDocRef.get();
+            let requests = reqDocSnap.exists ? (reqDocSnap.data().requests || []) : [];
 
-requests = requests.filter(r => r.userId !== primaryUserId && r.identifier?.toLowerCase() !== userIdentifier.toLowerCase());
-requests.push({
-    userId: primaryUserId,
-    identifier: userIdentifier,
-    fullName: matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim() || matchedUser.username,
-    createdAt: new Date().toISOString()
-});
+            requests = requests.filter(r => r.userId !== primaryUserId && r.identifier?.toLowerCase() !== userIdentifier.toLowerCase());
+            requests.push({
+                userId: primaryUserId,
+                identifier: userIdentifier,
+                fullName: matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim() || matchedUser.username,
+                createdAt: new Date().toISOString()
+            });
 
-const requestPayload = { requests, updatedAt: new Date().toISOString() };
-await reqDocRef.set(requestPayload);
-saveToLocalMirror(targetHotelId, 'config', 'passwordRequests', requestPayload);
-console.log(`[REQUEST_PASSWORD_RESET] Notification de demande de mot de passe ajoutée pour l'admin.`);
+            const requestPayload = { requests, updatedAt: new Date().toISOString() };
+            await reqDocRef.set(requestPayload);
+            saveToLocalMirror(targetHotelId, 'config', 'passwordRequests', requestPayload);
+            console.log(`[REQUEST_PASSWORD_RESET] Notification de demande de mot de passe ajoutée pour l'admin.`);
 
-const origin = req.headers.origin || req.headers.referer || '';
-let frontendBaseUrl = 'http://localhost:3000';
+            const origin = req.headers.origin || req.headers.referer || '';
+            let frontendBaseUrl = 'http://localhost:3000';
 
-if (origin.includes('centillion.online') || process.env.NODE_ENV === 'production') {
-    frontendBaseUrl = 'https://roomcheck.centillion.online';
-}
+            if (origin.includes('centillion.online') || process.env.NODE_ENV === 'production') {
+                frontendBaseUrl = 'https://roomcheck.centillion.online';
+            }
 
-const resetLink = `${frontendBaseUrl}/login.html?reset=true&token=${resetToken}&hotelId=${targetHotelId}`;
+            const resetLink = `${frontendBaseUrl}/login.html?reset=true&token=${resetToken}&hotelId=${targetHotelId}`;
 
-// 🚀 ENVOI DE L'E-MAIL AVEC LE DESIGN HTML D'ORIGINE RESTAURÉ
+            // 🚀 ENVOI RÉEL DE L'E-MAIL VIA NODEMAILER
 const mailOptions = {
     from: '"RoomCheck Sécurité" <noreply@centillion.online>',
-    replyTo: 'noreply@centillion.online',
     to: userIdentifier,
     subject: 'Réinitialisation de votre mot de passe - RoomCheck',
-    text: `Bonjour,\n\nUne demande de réinitialisation de mot de passe a été effectuée pour votre compte.\n\nCopiez ce lien pour réinitialiser votre mot de passe (valide 5 minutes) :\n${resetLink}\n\nSi vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail.\n\nRoomCheck - Centillion.Online`,
     html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
             
@@ -1444,9 +1442,9 @@ const mailOptions = {
     }]
 };
 
-await transporter.sendMail(mailOptions);
-console.log(`[REQUEST_PASSWORD_RESET] E-mail de réinitialisation envoyé avec succès à : ${userIdentifier}`);
-return res.json({ success: true, message: "E-mail de réinitialisation envoyé avec succès." });
+            await transporter.sendMail(mailOptions);
+            console.log(`[EMAIL] E-mail de réinitialisation envoyé avec succès à ${userIdentifier}`);
+            return res.json({ success: true, message: "E-mail de réinitialisation envoyé avec succès." });
         } catch (err) {
             console.error(`[REQUEST_PASSWORD_RESET] Erreur lors de la demande de réinitialisation :`, err);
             return res.status(500).json({ success: false, message: "Erreur serveur" });
