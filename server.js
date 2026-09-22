@@ -539,7 +539,7 @@ app.get('/api/admin/users', async (req, res) => {
 
 app.post('/api/admin/users', async (req, res) => {
     try {
-        const { hotelId, fullName, username, password, department, role, createdBy, isCreator } = req.body;
+        const { hotelId, fullName, username, password, department, role, createdBy, isCreator, email } = req.body;
 
         if (!hotelId || !username || !password) {
             return res.status(400).json({ success: false, message: 'Données manquantes.' });
@@ -554,24 +554,37 @@ app.post('/api/admin/users', async (req, res) => {
         }
 
         const cleanUsername = username.trim().toLowerCase();
-        if (currentUsers.some(u => (u.username || '').toLowerCase() === cleanUsername)) {
-            return res.status(409).json({ success: false, message: 'Nom d\'utilisateur déjà pris.' });
+        const cleanEmail = email ? email.trim().toLowerCase() : cleanUsername;
+
+        // Vérification d'unicité basée sur le username ou l'email
+        if (currentUsers.some(u => (u.username || '').toLowerCase() === cleanUsername || (u.email && u.email.toLowerCase() === cleanEmail))) {
+            return res.status(409).json({ success: false, message: 'Un utilisateur avec cet identifiant ou cet e-mail existe déjà.' });
         }
 
-        const hashedPassword = await bcrypt.hash(password.trim(), 10);
+        // Hachage du mot de passe
+        const rawPassword = password.trim();
+        let hashedPassword;
+        if (!rawPassword.startsWith('$2a$') && !rawPassword.startsWith('$2b$') && !rawPassword.startsWith('$2y$')) {
+            hashedPassword = await bcrypt.hash(rawPassword, 10);
+        } else {
+            hashedPassword = rawPassword;
+        }
+
         const userId = 'usr_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+        const isCreatorVal = !!isCreator;
 
         const newUser = {
             id: userId,
             fullName: fullName ? fullName.trim() : 'Utilisateur',
             username: cleanUsername,
+            email: cleanEmail,
             password: hashedPassword,
             passwordHash: hashedPassword,
             department: department || 'IT',
             role: role || 'user',
-            isCreator: !!isCreator,
+            isCreator: isCreatorVal,
             isFirstLogin: true,
-            colorMark: isCreator ? 'red' : 'default',
+            colorMark: isCreatorVal ? 'red' : 'default',
             createdBy: createdBy || 'Superadmin',
             createdAt: new Date().toISOString()
         };
@@ -1384,6 +1397,8 @@ app.post('/api/public-action', async (req, res) => {
             const resetLink = `${frontendBaseUrl}/login.html?reset=true&token=${resetToken}&hotelId=${targetHotelId}`;
 
             // 🚀 Envoi de l'e-mail via l'API HTTP de Brevo (Port 443 - Non bloqué par Render) avec ton template d'origine
+            const userName = user.fullName || user.username || 'Utilisateur';
+
             const htmlContent = `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
                     
@@ -1412,7 +1427,7 @@ app.post('/api/public-action', async (req, res) => {
 
                     <!-- Corps du message -->
                     <div style="padding: 30px 25px;">
-                        <p style="color: #334155; font-size: 15px; line-height: 1.5; margin-top: 0;">Bonjour,</p>
+                        <p style="color: #334155; font-size: 15px; line-height: 1.5; margin-top: 0;">Bonjour <strong>${userName}</strong>,</p>
                         <p style="color: #334155; font-size: 15px; line-height: 1.5;">Une demande de réinitialisation de mot de passe a été effectuée pour votre compte.</p>
                         <p style="color: #334155; font-size: 15px; line-height: 1.5;">Ce lien est sécurisé et valide pendant <strong>5 minutes</strong> :</p>
                         
@@ -1432,7 +1447,7 @@ app.post('/api/public-action', async (req, res) => {
                 </div>
             `;
 
-            const textContent = `Bonjour,\n\nUne demande de réinitialisation de mot de passe a été effectuée pour votre compte.\n\nCopiez ce lien pour réinitialiser votre mot de passe (valide 5 minutes) :\n${resetLink}\n\nSi vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail.\n\nRoomCheck - Centillion.Online`;
+            const textContent = `Bonjour ${userName},\n\nUne demande de réinitialisation de mot de passe a été effectuée pour votre compte.\n\nCopiez ce lien pour réinitialiser votre mot de passe (valide 5 minutes) :\n${resetLink}\n\nSi vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail.\n\nRoomCheck - Centillion.Online`;
 
             const brevoResponse = await fetch('https://api.brevo.com/v3/smtp/email', {
                 method: 'POST',
