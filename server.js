@@ -26,12 +26,12 @@ const app = express();
 
 // ✉️ Configuration du transporteur SMTP pour noreply@centillion.online
 const transporter = nodemailer.createTransport({
-    host: 'smtp-relay.brevo.com',
-    port: 587,
+    host: process.env.SMTP_HOST || 'smtp-relay.brevo.com',
+    port: Number(process.env.SMTP_PORT) || 587,
     secure: false,
     auth: {
-        user: 'baa4d9001@smtp-brevo.com',
-        pass: process.env.BREVO_SMTP_PASS // <-- Sécurisé par variable d'environnement
+        user: process.env.SMTP_USER || 'baa4d9001@smtp-brevo.com',
+        pass: process.env.BREVO_SMTP_PASS
     },
     tls: {
         rejectUnauthorized: false
