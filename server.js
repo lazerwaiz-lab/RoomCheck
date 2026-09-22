@@ -3,9 +3,10 @@ process.env.TZ = 'Africa/Porto-Novo';
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
-const fs = require('fs'); // <--- 1. Ajoute fs ici
+const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer'); // ✉️ Ajouté pour l'envoi d'e-mails
 
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -22,6 +23,20 @@ if (getApps().length === 0) {
 
 const db = getFirestore();
 const app = express();
+
+// ✉️ Configuration du transporteur SMTP pour noreply@centillion.online
+const transporter = nodemailer.createTransport({
+    host: 'mail.centillion.online', // L'hôte exact relevé sur ton webmail[cite: 8]
+    port: 587,                    // Port 587 indiqué sur ton webmail[cite: 8]
+    secure: false,                 // false obligatoire pour le port 587 en TLS
+    auth: {
+        user: 'noreply@centillion.online',
+        pass: '@Centillion1'
+    },
+    tls: {
+        rejectUnauthorized: false // Évite les blocages de certificat en local
+    }
+});
 
 app.use(
   helmet.contentSecurityPolicy({
@@ -197,7 +212,7 @@ app.post('/api/register-hotel', async (req, res) => {
             id: adminId,
             fullName: adminName.trim(),
             username: cleanEmail,
-            email: cleanEmail,
+            username: cleanEmail,
             password: hashedPassword,
             passwordHash: hashedPassword,
             department: 'ADMIN',
@@ -547,12 +562,12 @@ app.post('/api/admin/users', async (req, res) => {
             id: userId,
             fullName: fullName ? fullName.trim() : 'Utilisateur',
             username: cleanUsername,
-            email: cleanUsername.includes('@') ? cleanUsername : `${cleanUsername}@hotel.com`,
             password: hashedPassword,
             passwordHash: hashedPassword,
             department: department || 'IT',
             role: role || 'user',
             isCreator: !!isCreator,
+            isFirstLogin: true,
             colorMark: isCreator ? 'red' : 'default',
             createdBy: createdBy || 'Superadmin',
             createdAt: new Date().toISOString()
@@ -651,7 +666,27 @@ app.put('/api/admin/users/:id', async (req, res) => {
 });
 
 app.post('/api/admin/users/reset-password', async (req, res) => {
-    const { hotelId, targetUserId, newPassword, requesterId } = req.body;
+    let { hotelId, targetUserId, newPassword, requesterId, token } = req.body;
+
+    // 🌟 Si on arrive via un token de réinitialisation e-mail, on valide le token et on extrait les IDs automatiquement
+    if (token && hotelId) {
+        try {
+            const reqDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('passwordResets');
+            const reqDocSnap = await reqDocRef.get();
+            let resets = reqDocSnap.exists ? (reqDocSnap.data().resets || []) : [];
+            
+            const activeReset = resets.find(r => r.token === token && r.expiresAt > Date.now());
+            if (!activeReset) {
+                return res.json({ success: false, message: 'Lien de réinitialisation invalide or expiré.' });
+            }
+
+            targetUserId = activeReset.userId;
+            requesterId = activeReset.userId; // Bypass de la vérification admin puisqu'il a cliqué sur son lien e-mail sécurisé
+        } catch (err) {
+            console.error("Erreur validation token:", err);
+            return res.json({ success: false, message: 'Erreur lors de la validation du token.' });
+        }
+    }
 
     if (!hotelId || !targetUserId || !newPassword || newPassword.trim() === '' || !requesterId) {
         return res.json({ success: false, message: 'Paramètres manquants pour la réinitialisation.' });
@@ -667,27 +702,16 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
 
         let users = docSnap.data().users || [];
 
-        // Recherche élargie du demandeur pour éviter les faux négatifs
-        const requester = users.find(u => 
-            u.id === requesterId || 
-            u.uid === requesterId || 
-            u.username === requesterId || 
-            u.email === requesterId
-        );
-        
-        // 🛡️ Vérification robuste du rôle
-        const rawRole = requester ? (requester.role || requester.roles || '') : '';
-        const rolesArray = typeof rawRole === 'string' 
-            ? rawRole.split(',').map(r => r.trim().toLowerCase()) 
-            : Array.isArray(rawRole) ? rawRole.map(r => String(r).trim().toLowerCase()) : [];
-        
-        const isRequesterSuperAdmin = rolesArray.includes('superadmin') || rolesArray.includes('admin') || rolesArray.includes('it');
+        // Si ce n'est pas un reset par token e-mail, on vérifie que le demandeur est admin
+        if (!token) {
+            const requester = users.find(u => u.id === requesterId || u.uid === requesterId || u.username === requesterId || u.email === requesterId);
+            const rawRole = requester ? (requester.role || requester.roles || '') : '';
+            const rolesArray = typeof rawRole === 'string' ? rawRole.split(',').map(r => r.trim().toLowerCase()) : Array.isArray(rawRole) ? rawRole.map(r => String(r).trim().toLowerCase()) : [];
+            const isRequesterSuperAdmin = rolesArray.includes('superadmin') || rolesArray.includes('admin') || rolesArray.includes('it');
 
-        if (!requester || !isRequesterSuperAdmin) {
-            return res.json({ 
-                success: false, 
-                message: "Vous n'êtes pas autorisé à modifier les mots de passe." 
-            });
+            if (!requester || !isRequesterSuperAdmin) {
+                return res.json({ success: false, message: "Vous n'êtes pas autorisé à modifier les mots de passe." });
+            }
         }
 
         const index = users.findIndex(u => u.id === targetUserId);
@@ -698,14 +722,12 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
         const hashedPassword = await bcrypt.hash(newPassword.trim(), 10);
         const nowIso = new Date().toISOString();
 
-        // Mise à jour des informations de l'utilisateur ciblé + Remise à zéro totale des tentatives de blocage
         users[index].password = hashedPassword;
         users[index].passwordHash = hashedPassword;
-        users[index].isFirstLogin = true; 
+        users[index].isFirstLogin = false; 
         users[index].updatedAt = nowIso;
         users[index].passwordUpdatedAt = nowIso;
         
-        // 🔓 RÉINITIALISATION COMPLÈTE DES COMPTEURS DE SÉCURITÉ (Anti-Lockout)
         users[index].loginAttempts = {
             count: 0,
             finalLockout: false,
@@ -716,15 +738,16 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
         await configDocRef.update(payloadToSave);
         saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
 
-        // 🧹 SUPPRESSION DE LA NOTIFICATION ASSOCIÉE
-        const reqDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('passwordRequests');
-        const reqDocSnap = await reqDocRef.get();
-        if (reqDocSnap.exists) {
-            let requests = reqDocSnap.data().requests || [];
-            requests = requests.filter(r => r.userId !== targetUserId);
-            const reqPayload = { requests, updatedAt: nowIso };
-            await reqDocRef.set(reqPayload);
-            saveToLocalMirror(hotelId, 'config', 'passwordRequests', reqPayload);
+        // 🧹 Nettoyage du token utilisé s'il y en a un
+        if (token) {
+            const reqDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('passwordResets');
+            const reqDocSnap = await reqDocRef.get();
+            if (reqDocSnap.exists) {
+                let resets = reqDocSnap.data().resets || [];
+                resets = resets.filter(r => r.token !== token);
+                await reqDocRef.set({ resets, updatedAt: nowIso });
+                saveToLocalMirror(hotelId, 'config', 'passwordResets', { resets });
+            }
         }
 
         return res.json({ success: true, message: 'Mot de passe réinitialisé et compte débloqué avec succès !' });
@@ -803,38 +826,90 @@ app.post('/api/admin/config/users', async (req, res) => {
         const { hotelId, users, createdBy } = req.body;
 
         if (!hotelId || !users || !Array.isArray(users)) {
-            return res.status(400).json({ error: 'Données invalides ou liste utilisateurs absente.' });
+            return res.status(400).json({ success: false, error: 'Données invalides ou liste utilisateurs absente.' });
         }
 
         const docRef = db.collection('hotels').doc(hotelId).collection('config').doc('users');
         const docSnap = await docRef.get();
         const existingUsers = docSnap.exists ? (docSnap.data().users || []) : [];
 
-        const creators = existingUsers.filter(u => u.isCreator === true || u.isCreator === 'true');
-
+        // Traitement de chaque utilisateur de l'import Excel
         const processedUsers = await Promise.all(users.map(async (user, index) => {
-            const rawPassword = user.password || user.pass || '123456';
+            const cleanUsername = (user.username || user.email || '').trim().toLowerCase();
+            const cleanEmail = user.email ? user.email.trim().toLowerCase() : cleanUsername;
 
-            let hashedPassword = rawPassword;
-            if (!rawPassword.startsWith('$2a$') && !rawPassword.startsWith('$2b$') && !rawPassword.startsWith('$2y$')) {
-                hashedPassword = await bcrypt.hash(rawPassword.trim(), 10);
+            // Cherche si cet utilisateur existe déjà en base
+            const existingUser = existingUsers.find(u => 
+                (u.email && cleanEmail && u.email.toLowerCase() === cleanEmail) || 
+                (u.id && user.id && u.id === user.id) ||
+                (u.username && cleanUsername && u.username.toLowerCase() === cleanUsername)
+            );
+
+            let hashedPassword;
+            let isFirstLoginVal;
+
+            if (existingUser) {
+                const rawPassword = user.password || user.pass;
+                if (rawPassword && !rawPassword.startsWith('$2a$') && !rawPassword.startsWith('$2b$') && !rawPassword.startsWith('$2y$')) {
+                    hashedPassword = await bcrypt.hash(rawPassword.trim(), 10);
+                    isFirstLoginVal = true;
+                } else {
+                    hashedPassword = existingUser.password || existingUser.passwordHash;
+                    // S'il existe déjà, on garde sa valeur, sinon on met true par défaut
+                    isFirstLoginVal = existingUser.isFirstLogin !== undefined ? existingUser.isFirstLogin : true;
+                }
+            } else {
+                const rawPassword = user.password || user.pass || '123456';
+                if (!rawPassword.startsWith('$2a$') && !rawPassword.startsWith('$2b$') && !rawPassword.startsWith('$2y$')) {
+                    hashedPassword = await bcrypt.hash(rawPassword.trim(), 10);
+                } else {
+                    hashedPassword = rawPassword;
+                }
+                isFirstLoginVal = true;
             }
+
+            const isCreatorVal = existingUser ? existingUser.isCreator : !!user.isCreator;
 
             return {
                 ...user,
-                id: user.id || ('usr_' + Date.now() + '_' + index + '_' + Math.random().toString(36).substr(2, 4)),
+                id: existingUser ? existingUser.id : (user.id || ('usr_' + Date.now() + '_' + index + '_' + Math.random().toString(36).substr(2, 4))),
+                fullName: user.fullName ? user.fullName.trim() : (existingUser?.fullName || 'Utilisateur'),
+                username: cleanUsername,
+                email: cleanEmail.includes('@') ? cleanEmail : `${cleanEmail}@hotel.com`,
                 password: hashedPassword,
                 passwordHash: hashedPassword,
-                createdBy: user.createdBy || createdBy || 'Superadmin',
-                createdAt: user.createdAt || new Date().toISOString()
+                department: user.department || existingUser?.department || 'IT',
+                role: user.role || existingUser?.role || 'user',
+                isCreator: isCreatorVal,
+                isFirstLogin: isFirstLoginVal, // 🌟 GARANTI PRÉSENT
+                colorMark: isCreatorVal ? 'red' : (user.colorMark || existingUser?.colorMark || 'default'),
+                createdBy: user.createdBy || existingUser?.createdBy || createdBy || 'Superadmin',
+                createdAt: existingUser?.createdAt || user.createdAt || new Date().toISOString()
             };
         }));
 
-        const filteredImported = processedUsers.filter(pUser => 
-            !creators.some(c => (c.email && pUser.email && c.email.toLowerCase() === pUser.email.toLowerCase()) || c.id === pUser.id)
-        );
+        // 🌟 CORRECTION MAJEURE ICI : On s'assure que les anciens utilisateurs non présents dans l'Excel 
+        // récupèrent aussi un isFirstLogin s'ils ne l'avaient pas, et on intègre proprement les processedUsers.
+        const finalUsersMap = new Map();
 
-        const finalUsers = [...creators, ...filteredImported];
+        // 1. D'abord on traite les existants en s'assurant qu'ils ont le champ isFirstLogin
+        existingUsers.forEach(u => {
+            const key = (u.email || u.username || u.id || '').toLowerCase();
+            if (key) {
+                finalUsersMap.set(key, {
+                    ...u,
+                    isFirstLogin: u.isFirstLogin !== undefined ? u.isFirstLogin : false
+                });
+            }
+        });
+
+        // 2. Ensuite on écrase/ajoute avec les utilisateurs traités de l'Excel (qui ont leur isFirstLogin calculé)
+        processedUsers.forEach(pUser => {
+            const key = (pUser.email || pUser.username || pUser.id || '').toLowerCase();
+            if (key) finalUsersMap.set(key, pUser);
+        });
+
+        const finalUsers = Array.from(finalUsersMap.values());
 
         const payloadToSave = {
             hotelId,
@@ -845,10 +920,10 @@ app.post('/api/admin/config/users', async (req, res) => {
         await docRef.set(payloadToSave);
         saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
 
-        res.json({ message: 'Importation enregistrée sans impacter le créateur', users: finalUsers });
+        res.json({ success: true, message: 'Importation fusionnée et enregistrée avec succès', users: finalUsers });
     } catch (error) {
         console.error("Erreur import users:", error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -1137,7 +1212,6 @@ app.post('/api/public-action', async (req, res) => {
                     usersList = Array.isArray(data.users) ? data.users : Object.values(data);
                     saveToLocalMirror(hotelId, 'config', 'users', data);
                 } else {
-                    // Secours miroir local
                     const localData = readFromLocalMirror(hotelId, 'config', 'users');
                     if (localData && Array.isArray(localData.users)) {
                         usersList = localData.users;
@@ -1163,9 +1237,6 @@ app.post('/api/public-action', async (req, res) => {
                 return res.json({ success: false, message: "Utilisateur non trouvé" });
             }
         } catch (err) {
-            console.warn("⚠️ Cloud injoignable pour GET_USER_NAME, recherche dans les miroirs locaux...");
-            
-            // 🌟 Recherche par répertoires locaux si Firestore échoue totalement
             const hotelsDir = path.join(LOCAL_DATA_ROOT, 'hotels');
             const identifier = dataPayload?.identifier?.trim().toLowerCase();
             let foundFullName = null;
@@ -1192,12 +1263,11 @@ app.post('/api/public-action', async (req, res) => {
             if (foundFullName) {
                 return res.json({ success: true, fullName: foundFullName, source: 'RC-LOCALDATA-OFFLINE' });
             }
-
             return res.status(500).json({ success: false, message: "Erreur serveur et données locales introuvables" });
         }
     }
 
-    // Action : Demande de réinitialisation de mot de passe
+    // Action : Demande de réinitialisation de mot de passe par e-mail avec Token sécurisé
     if (action === 'REQUEST_PASSWORD_RESET') {
         try {
             const identifier = dataPayload?.identifier?.trim().toLowerCase();
@@ -1238,31 +1308,264 @@ app.post('/api/public-action', async (req, res) => {
                 }
             }
 
-            if (!matchedUser || !targetHotelId) {
-                return res.json({ success: true, message: "Demande prise en compte." });
+            const userIdentifier = matchedUser ? (matchedUser.email || matchedUser.username) : null;
+            const primaryUserId = matchedUser ? (matchedUser.id || matchedUser.uid) : null;
+
+            if (!matchedUser || !targetHotelId || !userIdentifier) {
+                return res.json({ success: true, message: "Si le compte existe, un e-mail a été envoyé." });
             }
 
+            const crypto = require('crypto');
+            const resetToken = crypto.randomBytes(32).toString('hex');
+            const tokenExpiration = Date.now() + 300000; // +5 minutes
+
+            // 1. Enregistrement pour la vérification du token (passwordResets)
+            const resetDocRef = db.collection('hotels').doc(targetHotelId).collection('config').doc('passwordResets');
+            const resetDocSnap = await resetDocRef.get();
+            let resets = resetDocSnap.exists ? (resetDocSnap.data().resets || []) : [];
+
+            resets = resets.filter(r => r.userId !== primaryUserId);
+            resets.push({
+                userId: primaryUserId,
+                email: userIdentifier,
+                token: resetToken,
+                expiresAt: tokenExpiration,
+                createdAt: new Date().toISOString()
+            });
+            await resetDocRef.set({ resets, updatedAt: new Date().toISOString() });
+            saveToLocalMirror(targetHotelId, 'config', 'passwordResets', { resets });
+
+            // 2. Enregistrement pour la notification admin (passwordRequests)
             const reqDocRef = db.collection('hotels').doc(targetHotelId).collection('config').doc('passwordRequests');
             const reqDocSnap = await reqDocRef.get();
             let requests = reqDocSnap.exists ? (reqDocSnap.data().requests || []) : [];
 
-            const existingIndex = requests.findIndex(r => r.userId === matchedUser.id);
-            if (existingIndex === -1) {
-                requests.push({
-                    userId: matchedUser.id,
-                    fullName: matchedUser.fullName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim(),
-                    identifier: matchedUser.username || matchedUser.email,
-                    createdAt: new Date().toISOString()
-                });
-                const reqPayload = { requests, updatedAt: new Date().toISOString() };
-                await reqDocRef.set(reqPayload);
-                saveToLocalMirror(targetHotelId, 'config', 'passwordRequests', reqPayload);
+            requests = requests.filter(r => r.userId !== primaryUserId && r.identifier?.toLowerCase() !== userIdentifier.toLowerCase());
+            requests.push({
+                userId: primaryUserId,
+                identifier: userIdentifier,
+                fullName: matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim() || matchedUser.username,
+                createdAt: new Date().toISOString()
+            });
+
+            const requestPayload = { requests, updatedAt: new Date().toISOString() };
+            await reqDocRef.set(requestPayload);
+            saveToLocalMirror(targetHotelId, 'config', 'passwordRequests', requestPayload);
+
+            const origin = req.headers.origin || req.headers.referer || '';
+            let frontendBaseUrl = 'http://localhost:3000';
+
+            if (origin.includes('centillion.online') || process.env.NODE_ENV === 'production') {
+                frontendBaseUrl = 'https://roomcheck.centillion.online';
             }
 
-            return res.json({ success: true, message: "Demande envoyée à l'administration." });
+            const resetLink = `${frontendBaseUrl}/login.html?reset=true&token=${resetToken}&hotelId=${targetHotelId}`;
+
+            const mailOptions = {
+                from: '"RoomCheck Sécurité" <noreply@centillion.online>',
+                replyTo: 'noreply@centillion.online',
+                to: userIdentifier,
+                subject: 'Réinitialisation de votre mot de passe - RoomCheck',
+                text: `Bonjour,\n\nUne demande de réinitialisation de mot de passe a été effectuée pour votre compte.\n\nCopiez ce lien pour réinitialiser votre mot de passe (valide 5 minutes) :\n${resetLink}\n\nSi vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail.\n\nRoomCheck - Centillion.Online`,
+                html: `
+                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+                        <div style="background-color: #0f172a; padding: 25px 20px; text-align: center;">
+                            <table align="center" cellpadding="0" cellspacing="0" style="margin: 0 auto;">
+                                <tr>
+                                    <td style="vertical-align: middle; text-align: center;">
+                                        <div style="background-color: #ffffff; width: 44px; height: 44px; border-radius: 10px; display: inline-block; vertical-align: middle; box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: center;">
+                                            <table width="100%" height="44" cellpadding="0" cellspacing="0">
+                                                <tr>
+                                                    <td align="center" valign="middle" style="height: 44px; line-height: 44px;">
+                                                        <img src="cid:roomchecklogo" alt="Logo" style="width: 32px; height: 32px; display: block; margin: 0 auto;" />
+                                                    </td>
+                                                </tr>
+                                            </table>
+                                        </div>
+                                    </td>
+                                    <td style="vertical-align: middle; padding-left: 14px; text-align: left;">
+                                        <span style="color: #ffffff; font-size: 20px; font-weight: bold; font-family: Arial, sans-serif; display: inline-block; vertical-align: middle;">RoomCheck Security</span>
+                                    </td>
+                                </tr>
+                            </table>
+                        </div>
+                        <div style="padding: 30px 25px;">
+                            <p style="color: #334155; font-size: 15px; line-height: 1.5; margin-top: 0;">Bonjour,</p>
+                            <p style="color: #334155; font-size: 15px; line-height: 1.5;">Une demande de réinitialisation de mot de passe a été effectuée pour votre compte.</p>
+                            <p style="color: #334155; font-size: 15px; line-height: 1.5;">Ce lien est sécurisé et valide pendant <strong>5 minutes</strong> :</p>
+                            <div style="text-align: center; margin: 35px 0;">
+                                <a href="${resetLink}" style="background-color: #0d9488; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; box-shadow: 0 4px 6px rgba(13, 148, 136, 0.2);">Réinitialiser mon mot de passe</a>
+                            </div>
+                            <p style="font-size: 13px; color: #64748b; text-align: center; line-height: 1.4; margin-top: 25px;">Si vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail en toute sécurité.</p>
+                            <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 25px 0;">
+                            <p style="font-size: 12px; color: #94a3b8; text-align: center; font-weight: bold; letter-spacing: 0.5px; margin: 0;">RoomCheck - Centillion.Online</p>
+                        </div>
+                    </div>
+                `,
+                attachments: [{
+                    filename: 'IT_RoomCheck.png',
+                    path: path.join(__dirname, 'IT_RoomCheck.png'),
+                    cid: 'roomchecklogo'
+                }]
+            };
+
+            await transporter.sendMail(mailOptions);
+            return res.json({ success: true, message: "E-mail de réinitialisation envoyé avec succès." });
         } catch (err) {
-            console.error("Erreur REQUEST_PASSWORD_RESET:", err);
             return res.status(500).json({ success: false, message: "Erreur serveur" });
+        }
+    }
+
+    // --- Action : Vérification du token de réinitialisation e-mail ---
+    if (action === 'VERIFY_RESET_TOKEN') {
+        try {
+            const { token, hotelId } = dataPayload || {};
+            if (!token || !hotelId) {
+                return res.json({ success: false, message: "Paramètres manquants." });
+            }
+
+            const reqDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('passwordResets');
+            const reqDocSnap = await reqDocRef.get();
+            
+            let resets = [];
+            if (reqDocSnap.exists) {
+                resets = reqDocSnap.data().resets || [];
+            } else {
+                const localData = readFromLocalMirror(hotelId, 'config', 'passwordResets');
+                if (localData && Array.isArray(localData.resets)) {
+                    resets = localData.resets;
+                }
+            }
+
+            const activeReset = resets.find(r => r.token === token && r.expiresAt > Date.now());
+            if (!activeReset) {
+                return res.json({ success: false, message: "Lien de réinitialisation invalide ou expiré." });
+            }
+
+            const userDocSnap = await db.collection('hotels').doc(hotelId).collection('config').doc('users').get();
+            let usersList = [];
+            if (userDocSnap.exists) {
+                const data = userDocSnap.data();
+                usersList = Array.isArray(data.users) ? data.users : Object.values(data);
+                saveToLocalMirror(hotelId, 'config', 'users', data);
+            } else {
+                const localData = readFromLocalMirror(hotelId, 'config', 'users');
+                if (localData && Array.isArray(localData.users)) {
+                    usersList = localData.users;
+                }
+            }
+
+            const matchedUser = usersList.find(u => {
+                if (!u) return false;
+                const uId = u.id || u.uid;
+                const uEmail = (u.email || u.username || '').toLowerCase();
+                return (activeReset.userId && uId === activeReset.userId) || 
+                       (activeReset.email && uEmail === activeReset.email.toLowerCase());
+            });
+            
+            if (!matchedUser) {
+                return res.json({ success: false, message: "Utilisateur introuvable." });
+            }
+
+            const userId = matchedUser.id || matchedUser.uid;
+            const fullName = matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim() || matchedUser.username || 'Collaborateur';
+
+            return res.json({ 
+                success: true, 
+                userId: userId, 
+                fullName: fullName 
+            });
+
+        } catch (err) {
+            return res.status(500).json({ success: false, message: "Erreur serveur" });
+        }
+    }
+
+    // --- Action : Mise à jour effective du mot de passe et nettoyage multi-critères ---
+    if (action === 'UPDATE_PASSWORD') {
+        try {
+            const { token, hotelId, newPassword } = dataPayload || {};
+            
+            if (!token || !hotelId || !newPassword) {
+                return res.json({ success: false, message: "Paramètres manquants pour la mise à jour." });
+            }
+
+            // 1. Vérifier le token dans passwordResets
+            const resetDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('passwordResets');
+            const resetDocSnap = await resetDocRef.get();
+            let resets = resetDocSnap.exists ? (resetDocSnap.data().resets || []) : [];
+
+            const activeReset = resets.find(r => r.token === token && r.expiresAt > Date.now());
+            if (!activeReset) {
+                return res.json({ success: false, message: "Jeton de réinitialisation invalide ou expiré." });
+            }
+
+            const targetUserId = activeReset.userId;
+            const targetEmail = activeReset.email ? activeReset.email.toLowerCase() : null;
+
+            // 2. Hasher le nouveau mot de passe avec bcrypt
+            const bcrypt = require('bcrypt');
+            const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+            // 3. Mettre à jour le tableau des utilisateurs dans Firestore
+            const usersDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('users');
+            const usersDocSnap = await usersDocRef.get();
+
+            let matchedUserEmail = null;
+            if (usersDocSnap.exists) {
+                const data = usersDocSnap.data();
+                let usersList = Array.isArray(data.users) ? data.users : Object.values(data);
+
+                usersList = usersList.map(u => {
+                    if (u && (u.id === targetUserId || u.uid === targetUserId || (targetEmail && (u.email || u.username || '').toLowerCase() === targetEmail))) {
+                        matchedUserEmail = (u.email || u.username || '').toLowerCase();
+                        return {
+                            ...u,
+                            password: hashedPassword,
+                            passwordHash: hashedPassword,
+                            passwordUpdatedAt: new Date().toISOString(),
+                            updatedAt: new Date().toISOString()
+                        };
+                    }
+                    return u;
+                });
+
+                const updatedUserData = { users: usersList, updatedAt: new Date().toISOString() };
+                await usersDocRef.set(updatedUserData);
+                saveToLocalMirror(hotelId, 'config', 'users', updatedUserData);
+            }
+
+            // 4. Nettoyage multi-critères de la notification admin
+            resets = resets.filter(r => r.token !== token);
+            await resetDocRef.set({ resets, updatedAt: new Date().toISOString() });
+            saveToLocalMirror(hotelId, 'config', 'passwordResets', { resets });
+
+            const reqDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('passwordRequests');
+            const reqDocSnap = await reqDocRef.get();
+            
+            if (reqDocSnap.exists) {
+                let requests = reqDocSnap.data().requests || [];
+                
+                requests = requests.filter(r => {
+                    if (!r) return false;
+                    const rId = r.userId;
+                    const rIdentifier = (r.identifier || '').toLowerCase();
+
+                    const matchId = targetUserId && rId === targetUserId;
+                    const matchEmail = (targetEmail && rIdentifier === targetEmail) || (matchedUserEmail && rIdentifier === matchedUserEmail);
+
+                    return !(matchId || matchEmail);
+                });
+                
+                const requestPayload = { requests, updatedAt: new Date().toISOString() };
+                await reqDocRef.set(requestPayload);
+                saveToLocalMirror(hotelId, 'config', 'passwordRequests', requestPayload);
+            }
+
+            return res.json({ success: true, message: "Mot de passe mis à jour avec succès et notification effacée." });
+
+        } catch (err) {
+            return res.status(500).json({ success: false, message: "Erreur serveur lors de la mise à jour." });
         }
     }
 
@@ -1667,9 +1970,19 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
             return res.json({ success: true, message: "Suppression effectuée avec succès." });
         } 
         else if (action === 'UPDATE') {
-            await collectionRef.doc(docId).set(dataPayload || {}, { merge: true });
+            let finalPayload = dataPayload || {};
+
+            // 🌟 SÉCURITÉ : Forcer isFirstLogin pour chaque utilisateur si on met à jour config/users
+            if (collectionName === 'config' && docId === 'users' && finalPayload.users && Array.isArray(finalPayload.users)) {
+                finalPayload.users = finalPayload.users.map(u => ({
+                    ...u,
+                    isFirstLogin: u.isFirstLogin !== undefined ? u.isFirstLogin : true
+                }));
+            }
+
+            await collectionRef.doc(docId).set(finalPayload, { merge: true });
             
-            saveToLocalMirror(hotelId, collectionName, docId, dataPayload);
+            saveToLocalMirror(hotelId, collectionName, docId, finalPayload);
 
             return res.json({ success: true, message: "Mise à jour effectuée avec succès." });
         }
@@ -1910,6 +2223,7 @@ app.post('/api/verify-session', async (req, res) => {
         return res.status(500).json({ valid: false, error: error.message });
     }
 });
+
 
 
 const PORT = process.env.PORT || 3000;
