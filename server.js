@@ -24,7 +24,22 @@ if (getApps().length === 0) {
 const db = getFirestore();
 const app = express();
 
-
+// ✉️ Configuration du transporteur SMTP pour noreply@centillion.online
+const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'smtp-relay.brevo.com',
+    port: Number(process.env.SMTP_PORT) || 587,
+    secure: false,
+    auth: {
+        user: process.env.SMTP_USER || 'baa4d9001@smtp-brevo.com',
+        pass: process.env.BREVO_SMTP_PASS
+    },
+    tls: {
+        rejectUnauthorized: false
+    },
+    connectionTimeout: 20000,
+    greetingTimeout: 20000,
+    socketTimeout: 20000
+});
 
 app.use(
   helmet.contentSecurityPolicy({
@@ -1321,90 +1336,117 @@ app.post('/api/public-action', async (req, res) => {
             }
 
             const crypto = require('crypto');
-            const resetToken = crypto.randomBytes(32).toString('hex');
-            const tokenExpiration = Date.now() + 300000; // +5 minutes
+const resetToken = crypto.randomBytes(32).toString('hex');
+const tokenExpiration = Date.now() + 300000; // +5 minutes
 
-            // 1. Enregistrement pour la vérification du token (passwordResets)
-            const resetDocRef = db.collection('hotels').doc(targetHotelId).collection('config').doc('passwordResets');
-            const resetDocSnap = await resetDocRef.get();
-            let resets = resetDocSnap.exists ? (resetDocSnap.data().resets || []) : [];
+// 1. Enregistrement pour la vérification du token (passwordResets)
+const resetDocRef = db.collection('hotels').doc(targetHotelId).collection('config').doc('passwordResets');
+const resetDocSnap = await resetDocRef.get();
+let resets = resetDocSnap.exists ? (resetDocSnap.data().resets || []) : [];
 
-            resets = resets.filter(r => r.userId !== primaryUserId);
-            resets.push({
-                userId: primaryUserId,
-                email: userIdentifier,
-                token: resetToken,
-                expiresAt: tokenExpiration,
-                createdAt: new Date().toISOString()
-            });
-            await resetDocRef.set({ resets, updatedAt: new Date().toISOString() });
-            saveToLocalMirror(targetHotelId, 'config', 'passwordResets', { resets });
-            console.log(`[REQUEST_PASSWORD_RESET] Token de réinitialisation enregistré pour l'utilisateur ID: ${primaryUserId}`);
+resets = resets.filter(r => r.userId !== primaryUserId);
+resets.push({
+    userId: primaryUserId,
+    email: userIdentifier,
+    token: resetToken,
+    expiresAt: tokenExpiration,
+    createdAt: new Date().toISOString()
+});
+await resetDocRef.set({ resets, updatedAt: new Date().toISOString() });
+saveToLocalMirror(targetHotelId, 'config', 'passwordResets', { resets });
+console.log(`[REQUEST_PASSWORD_RESET] Token de réinitialisation enregistré pour l'utilisateur ID: ${primaryUserId}`);
 
-            // 2. Enregistrement pour la notification admin (passwordRequests)
-            const reqDocRef = db.collection('hotels').doc(targetHotelId).collection('config').doc('passwordRequests');
-            const reqDocSnap = await reqDocRef.get();
-            let requests = reqDocSnap.exists ? (reqDocSnap.data().requests || []) : [];
+// 2. Enregistrement pour la notification admin (passwordRequests)
+const reqDocRef = db.collection('hotels').doc(targetHotelId).collection('config').doc('passwordRequests');
+const reqDocSnap = await reqDocRef.get();
+let requests = reqDocSnap.exists ? (reqDocSnap.data().requests || []) : [];
 
-            requests = requests.filter(r => r.userId !== primaryUserId && r.identifier?.toLowerCase() !== userIdentifier.toLowerCase());
-            requests.push({
-                userId: primaryUserId,
-                identifier: userIdentifier,
-                fullName: matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim() || matchedUser.username,
-                createdAt: new Date().toISOString()
-            });
+requests = requests.filter(r => r.userId !== primaryUserId && r.identifier?.toLowerCase() !== userIdentifier.toLowerCase());
+requests.push({
+    userId: primaryUserId,
+    identifier: userIdentifier,
+    fullName: matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim() || matchedUser.username,
+    createdAt: new Date().toISOString()
+});
 
-            const requestPayload = { requests, updatedAt: new Date().toISOString() };
-            await reqDocRef.set(requestPayload);
-            saveToLocalMirror(targetHotelId, 'config', 'passwordRequests', requestPayload);
-            console.log(`[REQUEST_PASSWORD_RESET] Notification de demande de mot de passe ajoutée pour l'admin.`);
+const requestPayload = { requests, updatedAt: new Date().toISOString() };
+await reqDocRef.set(requestPayload);
+saveToLocalMirror(targetHotelId, 'config', 'passwordRequests', requestPayload);
+console.log(`[REQUEST_PASSWORD_RESET] Notification de demande de mot de passe ajoutée pour l'admin.`);
 
-            const origin = req.headers.origin || req.headers.referer || '';
-            let frontendBaseUrl = 'http://localhost:3000';
+const origin = req.headers.origin || req.headers.referer || '';
+let frontendBaseUrl = 'http://localhost:3000';
 
-            if (origin.includes('centillion.online') || process.env.NODE_ENV === 'production') {
-                frontendBaseUrl = 'https://roomcheck.centillion.online';
-            }
+if (origin.includes('centillion.online') || process.env.NODE_ENV === 'production') {
+    frontendBaseUrl = 'https://roomcheck.centillion.online';
+}
 
-            const resetLink = `${frontendBaseUrl}/login.html?reset=true&token=${resetToken}&hotelId=${targetHotelId}`;
+const resetLink = `${frontendBaseUrl}/login.html?reset=true&token=${resetToken}&hotelId=${targetHotelId}`;
 
-            // Envoi de l'e-mail via l'API HTTP de Brevo (Port 443 - Non bloqué par Render)
-            const brevoResponse = await fetch('https://api.brevo.com/v3/smtp/email', {
-                method: 'POST',
-                headers: {
-                    'accept': 'application/json',
-                    'api-key': process.env.BREVO_SMTP_PASS,
-                    'content-type': 'application/json'
-                },
-                body: JSON.stringify({
-                    sender: {
-                        name: "RoomCheck Sécurité",
-                        email: "noreply@centillion.online"
-                    },
-                    to: [{ email: userIdentifier }],
-                    subject: "Réinitialisation de votre mot de passe - RoomCheck",
-                    htmlContent: `
-                        <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-                            <h2>Réinitialisation de mot de passe</h2>
-                            <p>Bonjour,</p>
-                            <p>Une demande de réinitialisation de mot de passe a été effectuée pour votre compte RoomCheck.</p>
-                            <p><a href="${resetLink}" style="background: #0d9488; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Réinitialiser mon mot de passe</a></p>
-                            <p>Ce lien est valide pendant 5 minutes.</p>
-                            <p>Si vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail.</p>
-                            <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-                            <p style="font-size: 12px; color: #777;">RoomCheck - Centillion.Online</p>
-                        </div>
-                    `
-                })
-            });
+// 🚀 ENVOI DE L'E-MAIL AVEC LE DESIGN HTML D'ORIGINE RESTAURÉ
+const mailOptions = {
+    from: '"RoomCheck Sécurité" <noreply@centillion.online>',
+    replyTo: 'noreply@centillion.online',
+    to: userIdentifier,
+    subject: 'Réinitialisation de votre mot de passe - RoomCheck',
+    text: `Bonjour,\n\nUne demande de réinitialisation de mot de passe a été effectuée pour votre compte.\n\nCopiez ce lien pour réinitialiser votre mot de passe (valide 5 minutes) :\n${resetLink}\n\nSi vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail.\n\nRoomCheck - Centillion.Online`,
+    html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+            
+            <!-- En-tête centré avec un vrai centrage parfait du logo -->
+            <div style="background-color: #0f172a; padding: 25px 20px; text-align: center;">
+                <table align="center" cellpadding="0" cellspacing="0" style="margin: 0 auto;">
+                    <tr>
+                        <td style="vertical-align: middle; text-align: center;">
+                            <div style="background-color: #ffffff; width: 44px; height: 44px; border-radius: 10px; display: inline-block; vertical-align: middle; box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: center;">
+                                <!-- Table interne pour forcer le centrage parfait vertical et horizontal -->
+                                <table width="100%" height="44" cellpadding="0" cellspacing="0">
+                                    <tr>
+                                        <td align="center" valign="middle" style="height: 44px; line-height: 44px;">
+                                            <img src="cid:roomchecklogo" alt="Logo" style="width: 32px; height: 32px; display: block; margin: 0 auto;" />
+                                        </td>
+                                    </tr>
+                                </table>
+                            </div>
+                        </td>
+                        <td style="vertical-align: middle; padding-left: 14px; text-align: left;">
+                            <span style="color: #ffffff; font-size: 20px; font-weight: bold; font-family: Arial, sans-serif; display: inline-block; vertical-align: middle;">RoomCheck Security</span>
+                        </td>
+                    </tr>
+                </table>
+            </div>
 
-            if (!brevoResponse.ok) {
-                const errorData = await brevoResponse.json();
-                throw new Error(`Erreur API Brevo: ${JSON.stringify(errorData)}`);
-            }
+            <!-- Corps du message -->
+            <div style="padding: 30px 25px;">
+                <p style="color: #334155; font-size: 15px; line-height: 1.5; margin-top: 0;">Bonjour,</p>
+                <p style="color: #334155; font-size: 15px; line-height: 1.5;">Une demande de réinitialisation de mot de passe a été effectuée pour votre compte.</p>
+                <p style="color: #334155; font-size: 15px; line-height: 1.5;">Ce lien est sécurisé et valide pendant <strong>5 minutes</strong> :</p>
+                
+                <!-- Bouton d'action -->
+                <div style="text-align: center; margin: 35px 0;">
+                    <a href="${resetLink}" style="background-color: #0d9488; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; box-shadow: 0 4px 6px rgba(13, 148, 136, 0.2);">Réinitialiser mon mot de passe</a>
+                </div>
+                
+                <!-- Avertissement -->
+                <p style="font-size: 13px; color: #64748b; text-align: center; line-height: 1.4; margin-top: 25px;">Si vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail en toute sécurité.</p>
+                
+                <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 25px 0;">
+                
+                <!-- Pied de page -->
+                <p style="font-size: 12px; color: #94a3b8; text-align: center; font-weight: bold; letter-spacing: 0.5px; margin: 0;">RoomCheck - Centillion.Online</p>
+            </div>
+        </div>
+    `,
+    attachments: [{
+        filename: 'IT_RoomCheck.png',
+        path: path.join(__dirname, 'IT_RoomCheck.png'),
+        cid: 'roomchecklogo'
+    }]
+};
 
-            console.log(`[REQUEST_PASSWORD_RESET] E-mail de réinitialisation envoyé avec succès via l'API Brevo à : ${userIdentifier}`);
-            return res.json({ success: true, message: "E-mail de réinitialisation envoyé avec succès." });
+await transporter.sendMail(mailOptions);
+console.log(`[REQUEST_PASSWORD_RESET] E-mail de réinitialisation envoyé avec succès à : ${userIdentifier}`);
+return res.json({ success: true, message: "E-mail de réinitialisation envoyé avec succès." });
         } catch (err) {
             console.error(`[REQUEST_PASSWORD_RESET] Erreur lors de la demande de réinitialisation :`, err);
             return res.status(500).json({ success: false, message: "Erreur serveur" });
