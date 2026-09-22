@@ -24,22 +24,7 @@ if (getApps().length === 0) {
 const db = getFirestore();
 const app = express();
 
-// ✉️ Configuration du transporteur SMTP pour noreply@centillion.online
-const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'smtp-relay.brevo.com',
-    port: Number(process.env.SMTP_PORT) || 587,
-    secure: false,
-    auth: {
-        user: process.env.SMTP_USER || 'baa4d9001@smtp-brevo.com',
-        pass: process.env.BREVO_SMTP_PASS
-    },
-    tls: {
-        rejectUnauthorized: false
-    },
-    connectionTimeout: 20000,
-    greetingTimeout: 20000,
-    socketTimeout: 20000
-});
+
 
 app.use(
   helmet.contentSecurityPolicy({
@@ -1383,22 +1368,42 @@ app.post('/api/public-action', async (req, res) => {
 
             const resetLink = `${frontendBaseUrl}/login.html?reset=true&token=${resetToken}&hotelId=${targetHotelId}`;
 
-            const mailOptions = {
-                from: '"RoomCheck Sécurité" <noreply@centillion.online>',
-                replyTo: 'noreply@centillion.online',
-                to: userIdentifier,
-                subject: 'Réinitialisation de votre mot de passe - RoomCheck',
-                text: `Bonjour,\n\nUne demande de réinitialisation de mot de passe a été effectuée pour votre compte.\n\nCopiez ce lien pour réinitialiser votre mot de passe (valide 5 minutes) :\n${resetLink}\n\nSi vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail.\n\nRoomCheck - Centillion.Online`,
-                html: `...`, // (HTML inchangé pour plus de concision)
-                attachments: [{
-                    filename: 'IT_RoomCheck.png',
-                    path: path.join(__dirname, 'IT_RoomCheck.png'),
-                    cid: 'roomchecklogo'
-                }]
-            };
+            // Envoi de l'e-mail via l'API HTTP de Brevo (Port 443 - Non bloqué par Render)
+            const brevoResponse = await fetch('https://api.brevo.com/v3/smtp/email', {
+                method: 'POST',
+                headers: {
+                    'accept': 'application/json',
+                    'api-key': process.env.BREVO_SMTP_PASS,
+                    'content-type': 'application/json'
+                },
+                body: JSON.stringify({
+                    sender: {
+                        name: "RoomCheck Sécurité",
+                        email: "noreply@centillion.online"
+                    },
+                    to: [{ email: userIdentifier }],
+                    subject: "Réinitialisation de votre mot de passe - RoomCheck",
+                    htmlContent: `
+                        <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
+                            <h2>Réinitialisation de mot de passe</h2>
+                            <p>Bonjour,</p>
+                            <p>Une demande de réinitialisation de mot de passe a été effectuée pour votre compte RoomCheck.</p>
+                            <p><a href="${resetLink}" style="background: #0d9488; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Réinitialiser mon mot de passe</a></p>
+                            <p>Ce lien est valide pendant 5 minutes.</p>
+                            <p>Si vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail.</p>
+                            <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+                            <p style="font-size: 12px; color: #777;">RoomCheck - Centillion.Online</p>
+                        </div>
+                    `
+                })
+            });
 
-            await transporter.sendMail(mailOptions);
-            console.log(`[REQUEST_PASSWORD_RESET] E-mail de réinitialisation envoyé avec succès à : ${userIdentifier}`);
+            if (!brevoResponse.ok) {
+                const errorData = await brevoResponse.json();
+                throw new Error(`Erreur API Brevo: ${JSON.stringify(errorData)}`);
+            }
+
+            console.log(`[REQUEST_PASSWORD_RESET] E-mail de réinitialisation envoyé avec succès via l'API Brevo à : ${userIdentifier}`);
             return res.json({ success: true, message: "E-mail de réinitialisation envoyé avec succès." });
         } catch (err) {
             console.error(`[REQUEST_PASSWORD_RESET] Erreur lors de la demande de réinitialisation :`, err);
