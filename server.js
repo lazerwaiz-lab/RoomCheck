@@ -589,6 +589,7 @@ app.post('/api/admin/users', async (req, res) => {
             createdAt: new Date().toISOString()
         };
 
+        // Ajout dans le tableau en mémoire
         currentUsers.push(newUser);
 
         const payloadToSave = {
@@ -597,9 +598,10 @@ app.post('/api/admin/users', async (req, res) => {
             updatedAt: new Date().toISOString()
         };
 
+        // Sauvegarde directe dans Firestore (met à jour le tableau complet proprement)
         await configDocRef.set(payloadToSave, { merge: true });
 
-        // 🌟 Sauvegarde immédiate dans le miroir local RC-LOCALDATA
+        // 🌟 Mise à jour immédiate dans le miroir local RC-LOCALDATA
         saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
 
         const safeUser = { ...newUser };
@@ -809,7 +811,8 @@ app.get('/api/hotels/:hotelId/password-requests', async (req, res) => {
 
 app.delete('/api/admin/users/:id', async (req, res) => {
     const userId = req.params.id;
-    const { hotelId } = req.body;
+    // On peut récupérer hotelId soit dans le body, soit en query string si le front l'envoie en paramètre
+    const hotelId = req.body.hotelId || req.query.hotelId;
 
     if (!hotelId) {
         return res.status(400).json({ success: false, message: 'ID hôtel manquant.' });
@@ -824,10 +827,23 @@ app.delete('/api/admin/users/:id', async (req, res) => {
         }
 
         let users = docSnap.data().users || [];
-        const updatedUsers = users.filter(u => u.id !== userId);
+        
+        // On isole l'utilisateur à supprimer pour s'assurer qu'on ne touche qu'à ça
+        const initialCount = users.length;
+        const updatedUsers = users.filter(u => u.id !== userId && u.username !== userId);
 
-        const payloadToSave = { hotelId, users: updatedUsers, updatedAt: new Date().toISOString() };
-        await configDocRef.update(payloadToSave);
+        if (updatedUsers.length === initialCount) {
+            return res.status(404).json({ success: false, message: 'Utilisateur introuvable dans la liste.' });
+        }
+
+        const payloadToSave = { 
+            hotelId, 
+            users: updatedUsers, // Conserve intacts les mots de passe hachés des autres utilisateurs
+            updatedAt: new Date().toISOString() 
+        };
+
+        // Utilisation de .set avec merge: true pour éviter d'écraser structurellement le document
+        await configDocRef.set(payloadToSave, { merge: true });
         saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
 
         return res.json({ success: true, message: 'Utilisateur supprimé avec succès !' });
