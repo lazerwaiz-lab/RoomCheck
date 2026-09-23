@@ -1350,7 +1350,7 @@ app.post('/api/public-action', async (req, res) => {
 
             const crypto = require('crypto');
             const resetToken = crypto.randomBytes(32).toString('hex');
-            const tokenExpiration = Date.now() + 300000; // +5 minutes
+            const tokenExpiration = Date.now() + 1800000; // +30 minutes (contre le délai de la sandbox Trend Micro)
 
             // 1. Enregistrement pour la vérification du token (passwordResets)
             const resetDocRef = db.collection('hotels').doc(targetHotelId).collection('config').doc('passwordResets');
@@ -1429,7 +1429,7 @@ app.post('/api/public-action', async (req, res) => {
                     <div style="padding: 30px 25px;">
                         <p style="color: #334155; font-size: 15px; line-height: 1.5; margin-top: 0;">Bonjour <strong>${userName}</strong>,</p>
                         <p style="color: #334155; font-size: 15px; line-height: 1.5;">Une demande de réinitialisation de mot de passe a été effectuée pour votre compte.</p>
-                        <p style="color: #334155; font-size: 15px; line-height: 1.5;">Ce lien est sécurisé et valide pendant <strong>5 minutes</strong> :</p>
+                        <p style="color: #334155; font-size: 15px; line-height: 1.5;">Ce lien est sécurisé et valide pendant <strong>30 minutes</strong> :</p>
                         
                         <!-- Bouton d'action -->
                         <div style="text-align: center; margin: 35px 0;">
@@ -1447,7 +1447,7 @@ app.post('/api/public-action', async (req, res) => {
                 </div>
             `;
 
-            const textContent = `Bonjour ${userName},\n\nUne demande de réinitialisation de mot de passe a été effectuée pour votre compte.\n\nCopiez ce lien pour réinitialiser votre mot de passe (valide 5 minutes) :\n${resetLink}\n\nSi vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail.\n\nRoomCheck - Centillion.Online`;
+            const textContent = `Bonjour ${userName},\n\nUne demande de réinitialisation de mot de passe a été effectuée pour votre compte.\n\nCopiez ce lien pour réinitialiser votre mot de passe (valide 30 minutes) :\n${resetLink}\n\nSi vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail.\n\nRoomCheck - Centillion.Online`;
 
             const brevoResponse = await fetch('https://api.brevo.com/v3/smtp/email', {
                 method: 'POST',
