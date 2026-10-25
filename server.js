@@ -50,31 +50,31 @@ app.use(
         "'unsafe-inline'", 
         "https://cdn.jsdelivr.net", 
         "https://cdnjs.cloudflare.com", 
-        "https://www.gstatic.com" // <--- Ajoutez ceci ici
+        "https://www.gstatic.com"
       ],
       scriptSrcAttr: ["'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com", "https://cdnjs.cloudflare.com"],
       imgSrc: ["'self'", "data:", "https:"],
       connectSrc: [
-  "'self'", 
-  "https://roomcheck-1.onrender.com", 
-  "https://roomcheck.centillion.online", 
-  "http://localhost:3000", 
-  "http://127.0.0.1:3000",
-  "http://localhost:3001",
-  "http://127.0.0.1:3001",
-  "https://firestore.googleapis.com",       // <--- Ajoutez ceci
-  "https://*.firestore.googleapis.com",     // <--- Et ceci
-  "https://*.googleapis.com"                // <--- Et ceci pour être sûr
-]
+        "'self'", 
+        "https://roomcheck-1.onrender.com", 
+        "https://roomcheck.centillion.online", 
+        "http://localhost:3000", 
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "https://firestore.googleapis.com",
+        "https://*.firestore.googleapis.com",
+        "https://*.googleapis.com"
+      ]
     },
   })
 );
 
 const loginLimiter = rateLimit({
-    windowMs: 5 * 60 * 1000, // ⏱️ 5 minutes
-    max: 10, // Limite à 10 essais maximum par IP
+    windowMs: 5 * 60 * 1000,
+    max: 10,
     message: {
         success: false,
         message: "Trop de tentatives de connexion échouées. Veuillez réessayer dans 5 minutes."
@@ -120,7 +120,6 @@ function readFromLocalMirror(hotelId, collectionName, docId) {
     }
     return null;
 }
-// ==========================================
 
 // 1. Configuration CORS
 const allowedOrigins = [
@@ -153,18 +152,76 @@ app.get('/', (req, res) => {
 });
 
 // ==========================================
+// 💎 DÉFINITION DES PLANS ET LIMITES DE CHAMBRES
+// ==========================================
+const SUBSCRIPTION_PLANS = {
+    'essentielle': { min: 30, max: 50, name: 'Formule Essentielle' },
+    'pro': { min: 50, max: 80, name: 'Formule Pro & F&B' },
+    'avancee': { min: 80, max: 100, name: 'Formule Avancée / Luxe' },
+    'enterprise': { min: 101, max: 9999, name: 'Formule Enterprise' }
+};
+
+// ==========================================
+// 0. ROUTE DE GÉNÉRATION DU TOKEN SÉCURISÉ
+// ==========================================
+app.post('/api/generate-subscription-token', async (req, res) => {
+    const { plan } = req.body;
+    
+    if (!plan || !SUBSCRIPTION_PLANS[plan.toLowerCase()]) {
+        return res.status(400).json({ success: false, message: "Plan invalide." });
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = Date.now() + (15 * 60 * 1000);
+
+    try {
+        await db.collection('subscription_tokens').doc(token).set({
+            plan: plan.toLowerCase(),
+            expiresAt: expiresAt,
+            used: false,
+            createdAt: new Date().toISOString()
+        });
+
+        return res.json({ success: true, token: token });
+    } catch (error) {
+        console.error("Erreur génération token:", error);
+        return res.status(500).json({ success: false, message: "Erreur serveur." });
+    }
+});
+
+// ==========================================
 // 1. ROUTE D'INSCRIPTION D'UN NOUVEL HÔTEL
 // ==========================================
 app.post('/api/register-hotel', async (req, res) => {
-    const { hotelName, adminName, adminEmail, password } = req.body;
+    const { hotelName, adminName, adminEmail, password, otaSync, token } = req.body;
 
-    if (!hotelName || !adminName || !adminEmail || !password) {
-        return res.status(400).json({ success: false, message: 'Tous les champs sont obligatoires.' });
+    if (!hotelName || !adminName || !adminEmail || !password || !token) {
+        return res.status(400).json({ success: false, message: 'Tous les champs sont obligatoires, y compris le jeton d\'abonnement.' });
     }
 
     try {
         const cleanName = hotelName.trim();
         const cleanEmail = adminEmail.trim().toLowerCase();
+
+        const tokenDocRef = db.collection('subscription_tokens').doc(token);
+        const tokenDoc = await tokenDocRef.get();
+
+        if (!tokenDoc.exists) {
+            return res.status(400).json({ success: false, message: "Jeton d'abonnement invalide ou introuvable." });
+        }
+
+        const tokenData = tokenDoc.data();
+
+        if (tokenData.used || Date.now() > tokenData.expiresAt) {
+            return res.status(400).json({ success: false, message: "Ce lien d'inscription a expiré ou a déjà été utilisé." });
+        }
+
+        const planKey = tokenData.plan;
+        const planConfig = SUBSCRIPTION_PLANS[planKey];
+
+        if (!planConfig) {
+            return res.status(400).json({ success: false, message: "Formule d'abonnement associée invalide." });
+        }
 
         const allHotelsSnapshot = await db.collection('hotels').get();
         let existingHotelName = null;
@@ -200,8 +257,23 @@ app.post('/api/register-hotel', async (req, res) => {
             }
         }
 
+        const hotelOtaConfig = {
+            enabled: otaSync && otaSync.enabled ? true : false,
+            bookingIcalUrl: otaSync && otaSync.bookingIcalUrl ? otaSync.bookingIcalUrl.trim() : '',
+            expediaIcalUrl: otaSync && otaSync.expediaIcalUrl ? otaSync.expediaIcalUrl.trim() : '',
+            lastSync: null
+        };
+
+        await tokenDocRef.update({ used: true });
+
         const hotelRef = await db.collection('hotels').add({
             name: cleanName,
+            subscriptionPlan: planKey,
+            roomLimits: {
+                min: planConfig.min,
+                max: planConfig.max
+            },
+            otaSync: hotelOtaConfig,
             createdAt: new Date().toISOString()
         });
 
@@ -214,7 +286,6 @@ app.post('/api/register-hotel', async (req, res) => {
         const creatorAdminUser = {
             id: adminId,
             fullName: adminName.trim(),
-            username: cleanEmail,
             username: cleanEmail,
             password: hashedPassword,
             passwordHash: hashedPassword,
@@ -232,15 +303,69 @@ app.post('/api/register-hotel', async (req, res) => {
             updatedAt: new Date().toISOString()
         });
 
-        // 🌟 3. SAUVEGARDE DANS LE DOSSIER LOCAL RC-LOCALDATA AUTOMATIQUE
         saveToLocalMirror(hotelId, 'config', 'users', { hotelId, users: [creatorAdminUser] });
-        saveToLocalMirror(hotelId, '_meta', 'info', { name: cleanName, hotelId });
+        saveToLocalMirror(hotelId, '_meta', 'info', { 
+            name: cleanName, 
+            hotelId, 
+            subscriptionPlan: planKey,
+            roomLimits: planConfig,
+            otaSync: hotelOtaConfig 
+        });
+
+        // ✉️ ENVOI DE L'E-MAIL DE BIENVENUE LORS DE L'INSCRIPTION DE L'HÔTEL
+        try {
+            const frontendBaseUrl = (req.headers.origin || req.headers.referer || '').includes('centillion.online') 
+                ? 'https://roomcheck.centillion.online' 
+                : 'http://localhost:3000';
+
+            const loginUrl = `${frontendBaseUrl}/login.html`;
+
+            const htmlWelcomeContent = `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+                    <div style="background-color: #0f172a; padding: 25px 20px; text-align: center;">
+                        <h1 style="color: #ffffff; margin: 0; font-size: 22px;">Room<span style="color: #48bdb2;">Check</span></h1>
+                    </div>
+                    <div style="padding: 30px 25px;">
+                        <p style="color: #334155; font-size: 15px; line-height: 1.5; margin-top: 0;">Bonjour <strong>${adminName}</strong>,</p>
+                        <p style="color: #334155; font-size: 15px; line-height: 1.5;">Félicitations ! Votre établissement <strong>${cleanName}</strong> a été créé avec succès.</p>
+                        <p style="color: #334155; font-size: 15px; line-height: 1.5;">Merci d'avoir choisi <strong>RoomCheck</strong> pour la gestion de votre hôtel.</p>
+                        <p style="color: #334155; font-size: 15px; line-height: 1.5;">Vous pouvez dès à présent vous connecter à votre console d'administration à l'aide de votre identifiant (<strong>${cleanEmail}</strong>) :</p>
+                        
+                        <div style="text-align: center; margin: 35px 0;">
+                            <a href="${loginUrl}" style="background-color: #48bdb2; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; box-shadow: 0 4px 6px rgba(72, 189, 178, 0.3);">Accéder à mon espace RoomCheck</a>
+                        </div>
+                        
+                        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 25px 0;">
+                        <p style="font-size: 12px; color: #94a3b8; text-align: center; font-weight: bold; letter-spacing: 0.5px; margin: 0;">RoomCheck - Centillion.Online</p>
+                    </div>
+                </div>
+            `;
+
+            await fetch('https://api.brevo.com/v3/smtp/email', {
+                method: 'POST',
+                headers: {
+                    'accept': 'application/json',
+                    'api-key': process.env.BREVO_SMTP_PASS,
+                    'content-type': 'application/json'
+                },
+                body: JSON.stringify({
+                    sender: { name: "RoomCheck Support", email: "noreply@centillion.online" },
+                    to: [{ email: cleanEmail }],
+                    subject: `Bienvenue sur RoomCheck - Gestion de l'hôtel ${cleanName}`,
+                    htmlContent: htmlWelcomeContent,
+                    textContent: `Bonjour ${adminName},\n\nFélicitations ! Votre établissement ${cleanName} a été créé avec succès. Merci d'avoir choisi RoomCheck pour la gestion de votre hôtel.\n\nConnectez-vous ici : ${loginUrl}\n\nRoomCheck - Centillion.Online`
+                })
+            });
+        } catch (emailErr) {
+            console.error("[Register] Erreur lors de l'envoi de l'e-mail de bienvenue de l'hôtel :", emailErr);
+        }
 
         return res.json({
             success: true,
             message: 'Établissement et administrateur créés avec succès !',
             hotelId: hotelId,
-            hotelName: cleanName
+            hotelName: cleanName,
+            plan: planConfig.name
         });
 
     } catch (error) {
@@ -250,10 +375,10 @@ app.post('/api/register-hotel', async (req, res) => {
 });
 
 // ==========================================
-// 2. ROUTE UNIQUE DE LOGIN (Avec Gestion d'Échecs & Verrouillage)
+// 2. ROUTE UNIQUE DE LOGIN (Avec Alerte Sécurité & Gestion d'Échecs)
 // ==========================================
 app.post('/api/login', async (req, res) => {
-    const { username, email, password } = req.body;
+    const { username, email, password, interfaceName } = req.body;
     const identifier = (username || email || '').trim().toLowerCase();
 
     if (!identifier || !password) {
@@ -298,11 +423,8 @@ app.post('/api/login', async (req, res) => {
             }
         }
 
-        // --- MODE SECOURS LOCAL SI CLOUD INJOIGNABLE ---
         if (!foundUser) {
-            console.warn("⚠️ Cloud injoignable ou utilisateur introuvable, tentative via le miroir RC-LOCALDATA...");
             const hotelsDir = path.join(LOCAL_DATA_ROOT, 'hotels');
-            
             if (fs.existsSync(hotelsDir)) {
                 const hotelDirs = fs.readdirSync(hotelsDir);
                 for (const hId of hotelDirs) {
@@ -332,13 +454,9 @@ app.post('/api/login', async (req, res) => {
             return res.status(401).json({ success: false, message: 'Identifiant ou mot de passe incorrect.' });
         }
 
-        // ==========================================
-        // 🔒 GESTION DU BLOCAGE ET DES TENTATIVES
-        // ==========================================
         const now = Date.now();
         const loginAttempts = foundUser.loginAttempts || { count: 0, lockoutUntil: null, finalLockout: false };
 
-        // 1. Vérification si le compte est définitivement bloqué
         if (loginAttempts.finalLockout) {
             return res.status(403).json({
                 success: false,
@@ -346,7 +464,6 @@ app.post('/api/login', async (req, res) => {
             });
         }
 
-        // 2. Vérification si le compte est en pause temporaire (15 min)
         if (loginAttempts.lockoutUntil && now < loginAttempts.lockoutUntil) {
             const remainingMinutes = Math.ceil((loginAttempts.lockoutUntil - now) / (60 * 1000));
             return res.status(429).json({
@@ -354,14 +471,10 @@ app.post('/api/login', async (req, res) => {
                 message: `Trop de tentatives infructueuses. Compte temporairement verrouillé. Réessayez dans ${remainingMinutes} minute(s).`
             });
         } else if (loginAttempts.lockoutUntil && now >= loginAttempts.lockoutUntil) {
-            // La pause de 15 minutes est passée, on réinitialise pour donner les 3 dernières chances
-            loginAttempts.count = 5; // On considère qu'il a déjà consommé ses 5 premiers
+            loginAttempts.count = 5;
             loginAttempts.lockoutUntil = null;
         }
 
-        // ==========================================
-        // 🔑 VÉRIFICATION DU MOT DE PASSE
-        // ==========================================
         const storedPassword = foundUser.passwordHash || foundUser.password || '';
         let isPasswordCorrect = false;
 
@@ -371,13 +484,11 @@ app.post('/api/login', async (req, res) => {
             isPasswordCorrect = (password.trim() === storedPassword);
         }
 
-        // --- SI LE MOT DE PASSE EST INCORRECT ---
         if (!isPasswordCorrect) {
             loginAttempts.count += 1;
 
-            // Cas A : 5 échecs -> Première pause de 15 minutes
             if (loginAttempts.count === 5) {
-                loginAttempts.lockoutUntil = now + (5 * 60 * 1000); // 5 minutes
+                loginAttempts.lockoutUntil = now + (5 * 60 * 1000);
                 await updateLoginAttemptsInDb(userDocRef, foundUser.id, loginAttempts, foundHotel.id);
                 return res.status(429).json({
                     success: false,
@@ -385,7 +496,6 @@ app.post('/api/login', async (req, res) => {
                 });
             }
 
-            // Cas B : Après la pause, 3 nouvelles chances (soit 8 échecs au total) -> Blocage définitif
             if (loginAttempts.count >= 8) {
                 loginAttempts.finalLockout = true;
                 await updateLoginAttemptsInDb(userDocRef, foundUser.id, loginAttempts, foundHotel.id);
@@ -395,7 +505,6 @@ app.post('/api/login', async (req, res) => {
                 });
             }
 
-            // Cas C : Échec simple avant d'atteindre les paliers
             await updateLoginAttemptsInDb(userDocRef, foundUser.id, loginAttempts, foundHotel.id);
             const attemptsLeft = loginAttempts.count < 5 ? (5 - loginAttempts.count) : (8 - loginAttempts.count);
             return res.status(401).json({
@@ -404,54 +513,106 @@ app.post('/api/login', async (req, res) => {
             });
         }
 
-        // --- SI LE CONNEXION EST RÉUSSIE : On remet les compteurs à zéro ---
-loginAttempts.count = 0;
-loginAttempts.lockoutUntil = null;
-loginAttempts.finalLockout = false;
-await updateLoginAttemptsInDb(userDocRef, foundUser.id, loginAttempts, foundHotel.id);
+        loginAttempts.count = 0;
+        loginAttempts.lockoutUntil = null;
+        loginAttempts.finalLockout = false;
+        await updateLoginAttemptsInDb(userDocRef, foundUser.id, loginAttempts, foundHotel.id);
 
-delete foundUser.passwordHash;
-delete foundUser.password;
-delete foundUser.loginAttempts;
+        // ✉️ ALERTE DE CONNEXION POUR LES RÔLES PRIVILÉGIÉS (Hors simple "user")
+        try {
+            const userRoleStr = (foundUser.role || '').toLowerCase();
+            if (userRoleStr && userRoleStr !== 'user' && !userRoleStr.includes('housekeeping')) {
+                const targetInterface = interfaceName || "l'interface RoomCheck";
+                const userEmail = foundUser.email || foundUser.username;
+                const userName = foundUser.fullName || foundUser.username || 'Collaborateur';
+                const loginTime = new Date().toLocaleString('fr-FR', { timeZone: 'Africa/Porto-Novo' });
 
-// 🔐 Génération du jeton sécurisé infalsifiable lié à cette session
-const sessionToken = crypto.randomBytes(32).toString('hex');
+                const frontendBaseUrl = (req.headers.origin || req.headers.referer || '').includes('centillion.online') 
+                    ? 'https://roomcheck.centillion.online' 
+                    : 'http://localhost:3000';
 
-// On injecte le token directement dans l'objet utilisateur avant de l'enregistrer dans Firestore
-foundUser.sessionToken = sessionToken;
+                const resetSecurityLink = `${frontendBaseUrl}/login.html`;
 
-// Récupération de tous les utilisateurs du document pour mettre à jour le tableau
-const userDocSnap = await userDocRef.get();
-if (userDocSnap.exists) {
-    const data = userDocSnap.data();
-    let usersArray = data.users || [];
+                const htmlAlertContent = `
+                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+                        <div style="background-color: #0f172a; padding: 25px 20px; text-align: center;">
+                            <h1 style="color: #ffffff; margin: 0; font-size: 20px;">Room<span style="color: #48bdb2;">Check</span> - Alerte Sécurité</h1>
+                        </div>
+                        <div style="padding: 30px 25px;">
+                            <p style="color: #334155; font-size: 15px; line-height: 1.5; margin-top: 0;">Bonjour <strong>${userName}</strong>,</p>
+                            <p style="color: #334155; font-size: 15px; line-height: 1.5;">Une connexion à votre compte RoomCheck vient d'être effectuée avec succès.</p>
+                            
+                            <div style="background: #f8fafc; border-left: 4px solid #48bdb2; padding: 12px 16px; margin: 20px 0; font-size: 13px; color: #334155;">
+                                <strong>Interface ciblée :</strong> ${targetInterface}<br>
+                                <strong>Date / Heure :</strong> ${loginTime}
+                            </div>
 
-    // On met à jour l'utilisateur spécifique dans le tableau avec son nouveau token
-    usersArray = usersArray.map(u => {
-        if (u.id === foundUser.id) {
-            return { ...u, sessionToken: sessionToken };
+                            <p style="color: #64748b; font-size: 13px; line-height: 1.5;">Si vous êtes à l'origine de cette action, vous pouvez ignorer cet e-mail en toute sécurité.</p>
+                            
+                            <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 15px; margin-top: 25px;">
+                                <p style="color: #dc2626; font-size: 13px; font-weight: bold; margin: 0 0 8px 0;">Ce n'est pas vous ?</p>
+                                <p style="color: #7f1d1d; font-size: 12px; margin: 0 0 12px 0;">Si vous n'avez pas initié cette connexion, sécurisez votre compte immédiatement en réinitialisant votre mot de passe.</p>
+                                <a href="${resetSecurityLink}" style="background-color: #dc2626; color: white; padding: 10px 20px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 12px; display: inline-block;">Sécuriser mon compte</a>
+                            </div>
+
+                            <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 25px 0;">
+                            <p style="font-size: 12px; color: #94a3b8; text-align: center; font-weight: bold; margin: 0;">RoomCheck - Centillion.Online</p>
+                        </div>
+                    </div>
+                `;
+
+                await fetch('https://api.brevo.com/v3/smtp/email', {
+                    method: 'POST',
+                    headers: {
+                        'accept': 'application/json',
+                        'api-key': process.env.BREVO_SMTP_PASS,
+                        'content-type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        sender: { name: "RoomCheck Sécurité", email: "noreply@centillion.online" },
+                        to: [{ email: userEmail }],
+                        subject: "🔒 Alerte de connexion à votre compte RoomCheck",
+                        htmlContent: htmlAlertContent,
+                        textContent: `Bonjour ${userName},\n\nUne connexion à votre compte vient d'être effectuée sur l'interface : ${targetInterface} (${loginTime}).\n\nSi ce n'est pas vous, rendez-vous ici pour réinitialiser votre mot de passe : ${resetSecurityLink}`
+                    })
+                });
+            }
+        } catch (alertErr) {
+            console.error("[Login Alert] Erreur lors de l'envoi de l'alerte de connexion :", alertErr);
         }
-        return u;
-    });
 
-    // Sauvegarde persistante directement dans le document de l'hôtel
-    await userDocRef.update({ users: usersArray });
-}
+        const sessionToken = crypto.randomBytes(32).toString('hex');
+        foundUser.sessionToken = sessionToken;
 
-delete foundUser.passwordHash;
-delete foundUser.password;
-delete foundUser.loginAttempts;
+        const userDocSnap = await userDocRef.get();
+        if (userDocSnap.exists) {
+            const data = userDocSnap.data();
+            let usersArray = data.users || [];
 
-return res.json({
-    success: true,
-    token: sessionToken, // On envoie le token au client
-    mustChangePassword: foundUser.isFirstLogin === true,
-    user: foundUser,
-    hotel: {
-        id: foundHotel.id,
-        name: foundHotel.name || 'Hôtel'
-    }
-});
+            usersArray = usersArray.map(u => {
+                if (u.id === foundUser.id) {
+                    return { ...u, sessionToken: sessionToken };
+                }
+                return u;
+            });
+
+            await userDocRef.update({ users: usersArray });
+        }
+
+        delete foundUser.passwordHash;
+        delete foundUser.password;
+        delete foundUser.loginAttempts;
+
+        return res.json({
+            success: true,
+            token: sessionToken,
+            mustChangePassword: foundUser.isFirstLogin === true,
+            user: foundUser,
+            hotel: {
+                id: foundHotel.id,
+                name: foundHotel.name || 'Hôtel'
+            }
+        });
 
     } catch (error) {
         console.error('Erreur Critique Login:', error);
@@ -459,7 +620,6 @@ return res.json({
     }
 });
 
-// Fonction utilitaire pour sauvegarder l'état des tentatives dans Firestore et en local
 async function updateLoginAttemptsInDb(userDocRef, userId, loginAttemptsData, hotelId) {
     if (!userDocRef) return;
     try {
@@ -489,7 +649,7 @@ app.post('/api/admin/login', (req, res) => {
 });
 
 // ==========================================
-// 3. GESTION DES UTILISATEURS DANS CONFIG/USERS (Avec Miroir & Fallback)
+// 3. GESTION DES UTILISATEURS DANS CONFIG/USERS
 // ==========================================
 
 app.get('/api/admin/users', async (req, res) => {
@@ -506,8 +666,6 @@ app.get('/api/admin/users', async (req, res) => {
         }
 
         const configData = docSnap.data();
-        
-        // 🌟 Mise à jour du miroir local préventivement
         saveToLocalMirror(hotelId, 'config', 'users', configData);
 
         const usersList = (configData.users || []).map(u => {
@@ -519,9 +677,6 @@ app.get('/api/admin/users', async (req, res) => {
 
         return res.json({ success: true, users: usersList });
     } catch (error) {
-        console.warn('⚠️ Cloud injoignable, bascule sur le miroir RC-LOCALDATA pour les utilisateurs...');
-        
-        // 🌟 Secours local si le cloud tombe
         const localData = readFromLocalMirror(hotelId, 'config', 'users');
         if (localData && Array.isArray(localData.users)) {
             const usersList = localData.users.map(u => {
@@ -556,12 +711,10 @@ app.post('/api/admin/users', async (req, res) => {
         const cleanUsername = username.trim().toLowerCase();
         const cleanEmail = email ? email.trim().toLowerCase() : cleanUsername;
 
-        // Vérification d'unicité basée sur le username ou l'email
         if (currentUsers.some(u => (u.username || '').toLowerCase() === cleanUsername || (u.email && u.email.toLowerCase() === cleanEmail))) {
             return res.status(409).json({ success: false, message: 'Un utilisateur avec cet identifiant ou cet e-mail existe déjà.' });
         }
 
-        // Hachage du mot de passe
         const rawPassword = password.trim();
         let hashedPassword;
         if (!rawPassword.startsWith('$2a$') && !rawPassword.startsWith('$2b$') && !rawPassword.startsWith('$2y$')) {
@@ -589,7 +742,6 @@ app.post('/api/admin/users', async (req, res) => {
             createdAt: new Date().toISOString()
         };
 
-        // Ajout dans le tableau en mémoire
         currentUsers.push(newUser);
 
         const payloadToSave = {
@@ -598,11 +750,42 @@ app.post('/api/admin/users', async (req, res) => {
             updatedAt: new Date().toISOString()
         };
 
-        // Sauvegarde directe dans Firestore (met à jour le tableau complet proprement)
         await configDocRef.set(payloadToSave, { merge: true });
-
-        // 🌟 Mise à jour immédiate dans le miroir local RC-LOCALDATA
         saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
+
+        // ✉️ ENVOI DE L'E-MAIL DE BIENVENUE AU NOUVEAU COLLABORATEUR CRÉÉ
+        try {
+            const frontendBaseUrl = (req.headers.origin || req.headers.referer || '').includes('centillion.online') 
+                ? 'https://roomcheck.centillion.online' 
+                : 'http://localhost:3000';
+
+            await fetch('https://api.brevo.com/v3/smtp/email', {
+                method: 'POST',
+                headers: {
+                    'accept': 'application/json',
+                    'api-key': process.env.BREVO_SMTP_PASS,
+                    'content-type': 'application/json'
+                },
+                body: JSON.stringify({
+                    sender: { name: "RoomCheck Administration", email: "noreply@centillion.online" },
+                    to: [{ email: cleanEmail }],
+                    subject: "Bienvenue sur RoomCheck - Votre compte collaborateur",
+                    htmlContent: `
+                        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; padding: 25px;">
+                            <h2 style="color: #0f172a;">Bienvenue sur RoomCheck !</h2>
+                            <p style="color: #334155;">Bonjour <strong>${newUser.fullName}</strong>,</p>
+                            <p style="color: #334155;">Un compte collaborateur vient d'être créé pour vous. Vous pouvez dès à présent vous connecter en utilisant votre identifiant : <strong>${cleanEmail}</strong></p>
+                            <div style="text-align: center; margin: 30px 0;">
+                                <a href="${frontendBaseUrl}/login.html" style="background-color: #48bdb2; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">Accéder à RoomCheck</a>
+                            </div>
+                        </div>
+                    `,
+                    textContent: `Bonjour ${newUser.fullName},\n\nUn compte collaborateur vient d'être créé pour vous sur RoomCheck. Connectez-vous avec votre identifiant : ${cleanEmail}\n\nLien : ${frontendBaseUrl}/login.html`
+                })
+            });
+        } catch (collabEmailErr) {
+            console.error("Erreur e-mail de bienvenue collaborateur:", collabEmailErr);
+        }
 
         const safeUser = { ...newUser };
         delete safeUser.password;
@@ -614,10 +797,6 @@ app.post('/api/admin/users', async (req, res) => {
         return res.status(500).json({ success: false, message: error.message });
     }
 });
-
-// ==========================================
-// ROUTES DE GESTION DES UTILISATEURS (Avec Miroir & Fallback Local)
-// ==========================================
 
 app.put('/api/admin/users/:id', async (req, res) => {
     const userId = req.params.id;
@@ -653,15 +832,10 @@ app.put('/api/admin/users/:id', async (req, res) => {
 
         const payloadToSave = { hotelId, users, updatedAt: new Date().toISOString() };
         await configDocRef.update(payloadToSave);
-
-        // 🌟 Synchro miroir local
         saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
 
         return res.json({ success: true, message: 'Utilisateur mis à jour avec succès !' });
     } catch (error) {
-        console.error('Erreur mise à jour utilisateur:', error);
-        
-        // --- SECOURS LOCAL ---
         const localData = readFromLocalMirror(hotelId, 'config', 'users');
         if (localData && Array.isArray(localData.users)) {
             const index = localData.users.findIndex(u => u.id === userId);
@@ -686,7 +860,6 @@ app.put('/api/admin/users/:id', async (req, res) => {
 app.post('/api/admin/users/reset-password', async (req, res) => {
     let { hotelId, targetUserId, newPassword, requesterId, token } = req.body;
 
-    // 🌟 Si on arrive via un token de réinitialisation e-mail, on valide le token et on extrait les IDs automatiquement
     if (token && hotelId) {
         try {
             const reqDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('passwordResets');
@@ -695,11 +868,11 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
             
             const activeReset = resets.find(r => r.token === token && r.expiresAt > Date.now());
             if (!activeReset) {
-                return res.json({ success: false, message: 'Lien de réinitialisation invalide or expiré.' });
+                return res.json({ success: false, message: 'Lien de réinitialisation invalide ou expiré.' });
             }
 
             targetUserId = activeReset.userId;
-            requesterId = activeReset.userId; // Bypass de la vérification admin puisqu'il a cliqué sur son lien e-mail sécurisé
+            requesterId = activeReset.userId;
         } catch (err) {
             console.error("Erreur validation token:", err);
             return res.json({ success: false, message: 'Erreur lors de la validation du token.' });
@@ -720,7 +893,6 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
 
         let users = docSnap.data().users || [];
 
-        // Si ce n'est pas un reset par token e-mail, on vérifie que le demandeur est admin
         if (!token) {
             const requester = users.find(u => u.id === requesterId || u.uid === requesterId || u.username === requesterId || u.email === requesterId);
             const rawRole = requester ? (requester.role || requester.roles || '') : '';
@@ -742,7 +914,7 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
 
         users[index].password = hashedPassword;
         users[index].passwordHash = hashedPassword;
-        users[index].isFirstLogin = false; 
+        users[index].isFirstLogin = true; 
         users[index].updatedAt = nowIso;
         users[index].passwordUpdatedAt = nowIso;
         
@@ -756,7 +928,6 @@ app.post('/api/admin/users/reset-password', async (req, res) => {
         await configDocRef.update(payloadToSave);
         saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
 
-        // 🧹 Nettoyage du token utilisé s'il y en a un
         if (token) {
             const reqDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('passwordResets');
             const reqDocSnap = await reqDocRef.get();
@@ -783,7 +954,6 @@ app.get('/api/hotels/:hotelId/password-requests', async (req, res) => {
         const reqDocSnap = await reqDocRef.get();
 
         if (!reqDocSnap.exists) {
-            // Tenter le miroir local
             const localReqs = readFromLocalMirror(hotelId, 'config', 'passwordRequests');
             if (localReqs && localReqs.requests) {
                 return res.status(200).json(localReqs.requests);
@@ -797,9 +967,6 @@ app.get('/api/hotels/:hotelId/password-requests', async (req, res) => {
         const requests = reqData.requests || [];
         return res.status(200).json(requests);
     } catch (error) {
-        console.error("Erreur récupération password-requests:", error);
-        
-        // Secours local
         const localReqs = readFromLocalMirror(hotelId, 'config', 'passwordRequests');
         if (localReqs && localReqs.requests) {
             return res.status(200).json(localReqs.requests);
@@ -811,7 +978,6 @@ app.get('/api/hotels/:hotelId/password-requests', async (req, res) => {
 
 app.delete('/api/admin/users/:id', async (req, res) => {
     const userId = req.params.id;
-    // On peut récupérer hotelId soit dans le body, soit en query string si le front l'envoie en paramètre
     const hotelId = req.body.hotelId || req.query.hotelId;
 
     if (!hotelId) {
@@ -827,8 +993,6 @@ app.delete('/api/admin/users/:id', async (req, res) => {
         }
 
         let users = docSnap.data().users || [];
-        
-        // On isole l'utilisateur à supprimer pour s'assurer qu'on ne touche qu'à ça
         const initialCount = users.length;
         const updatedUsers = users.filter(u => u.id !== userId && u.username !== userId);
 
@@ -838,11 +1002,10 @@ app.delete('/api/admin/users/:id', async (req, res) => {
 
         const payloadToSave = { 
             hotelId, 
-            users: updatedUsers, // Conserve intacts les mots de passe hachés des autres utilisateurs
+            users: updatedUsers,
             updatedAt: new Date().toISOString() 
         };
 
-        // Utilisation de .set avec merge: true pour éviter d'écraser structurellement le document
         await configDocRef.set(payloadToSave, { merge: true });
         saveToLocalMirror(hotelId, 'config', 'users', payloadToSave);
 
@@ -865,12 +1028,10 @@ app.post('/api/admin/config/users', async (req, res) => {
         const docSnap = await docRef.get();
         const existingUsers = docSnap.exists ? (docSnap.data().users || []) : [];
 
-        // Traitement de chaque utilisateur de l'import Excel
         const processedUsers = await Promise.all(users.map(async (user, index) => {
             const cleanUsername = (user.username || user.email || '').trim().toLowerCase();
             const cleanEmail = user.email ? user.email.trim().toLowerCase() : cleanUsername;
 
-            // Cherche si cet utilisateur existe déjà en base
             const existingUser = existingUsers.find(u => 
                 (u.email && cleanEmail && u.email.toLowerCase() === cleanEmail) || 
                 (u.id && user.id && u.id === user.id) ||
@@ -887,7 +1048,6 @@ app.post('/api/admin/config/users', async (req, res) => {
                     isFirstLoginVal = true;
                 } else {
                     hashedPassword = existingUser.password || existingUser.passwordHash;
-                    // S'il existe déjà, on garde sa valeur, sinon on met true par défaut
                     isFirstLoginVal = existingUser.isFirstLogin !== undefined ? existingUser.isFirstLogin : true;
                 }
             } else {
@@ -913,18 +1073,15 @@ app.post('/api/admin/config/users', async (req, res) => {
                 department: user.department || existingUser?.department || 'IT',
                 role: user.role || existingUser?.role || 'user',
                 isCreator: isCreatorVal,
-                isFirstLogin: isFirstLoginVal, // 🌟 GARANTI PRÉSENT
+                isFirstLogin: isFirstLoginVal,
                 colorMark: isCreatorVal ? 'red' : (user.colorMark || existingUser?.colorMark || 'default'),
                 createdBy: user.createdBy || existingUser?.createdBy || createdBy || 'Superadmin',
                 createdAt: existingUser?.createdAt || user.createdAt || new Date().toISOString()
             };
         }));
 
-        // 🌟 CORRECTION MAJEURE ICI : On s'assure que les anciens utilisateurs non présents dans l'Excel 
-        // récupèrent aussi un isFirstLogin s'ils ne l'avaient pas, et on intègre proprement les processedUsers.
         const finalUsersMap = new Map();
 
-        // 1. D'abord on traite les existants en s'assurant qu'ils ont le champ isFirstLogin
         existingUsers.forEach(u => {
             const key = (u.email || u.username || u.id || '').toLowerCase();
             if (key) {
@@ -935,7 +1092,6 @@ app.post('/api/admin/config/users', async (req, res) => {
             }
         });
 
-        // 2. Ensuite on écrase/ajoute avec les utilisateurs traités de l'Excel (qui ont leur isFirstLogin calculé)
         processedUsers.forEach(pUser => {
             const key = (pUser.email || pUser.username || pUser.id || '').toLowerCase();
             if (key) finalUsersMap.set(key, pUser);
@@ -1004,7 +1160,7 @@ app.patch('/api/admin/config/user-update', async (req, res) => {
 });
 
 // ==========================================
-// 4. AUTRES CONFIGURATIONS (Avec Miroir & Fallback)
+// 4. AUTRES CONFIGURATIONS
 // ==========================================
 app.get('/api/admin/config/roles', async (req, res) => {
     const { hotelId } = req.query;
@@ -1084,7 +1240,7 @@ app.post('/api/admin/config/structure', async (req, res) => {
 });
 
 // ==========================================
-// 5. GESTION DES TICKETS (Avec Miroir & Fallback)
+// 5. GESTION DES TICKETS
 // ==========================================
 app.get('/api/tickets', async (req, res) => {
     const { hotelId } = req.query;
@@ -1095,11 +1251,9 @@ app.get('/api/tickets', async (req, res) => {
         const tickets = [];
         snapshot.forEach(doc => tickets.push({ id: doc.id, ...doc.data() }));
         
-        // 🌟 Sauvegarde miroir globale des tickets de l'hôtel
         saveToLocalMirror(hotelId, 'tickets', 'all_tickets', { tickets });
         return res.json({ success: true, tickets });
     } catch (error) {
-        // Secours local
         const localTicketsData = readFromLocalMirror(hotelId, 'tickets', 'all_tickets');
         if (localTicketsData && Array.isArray(localTicketsData.tickets)) {
             return res.json({ success: true, tickets: localTicketsData.tickets, source: 'RC-LOCALDATA-OFFLINE' });
@@ -1137,7 +1291,6 @@ app.post('/api/tickets', async (req, res) => {
         const docRef = await db.collection('hotels').doc(hotelId).collection('tickets').add(newTicket);
         const ticketWithId = { id: docRef.id, ...newTicket };
 
-        // 🌟 Mettre à jour le miroir local des tickets
         const localTicketsData = readFromLocalMirror(hotelId, 'tickets', 'all_tickets') || { tickets: [] };
         localTicketsData.tickets.push(ticketWithId);
         saveToLocalMirror(hotelId, 'tickets', 'all_tickets', localTicketsData);
@@ -1180,7 +1333,6 @@ app.put('/api/tickets/:id/status', async (req, res) => {
 
         await ticketRef.update(updateData);
 
-        // Mettre à jour le miroir local
         const localTicketsData = readFromLocalMirror(hotelId, 'tickets', 'all_tickets');
         if (localTicketsData && Array.isArray(localTicketsData.tickets)) {
             const tIndex = localTicketsData.tickets.findIndex(t => t.id === ticketId);
@@ -1210,7 +1362,6 @@ app.delete('/api/tickets/:id', async (req, res) => {
 
         await ticketRef.delete();
 
-        // Mettre à jour le miroir local
         const localTicketsData = readFromLocalMirror(hotelId, 'tickets', 'all_tickets');
         if (localTicketsData && Array.isArray(localTicketsData.tickets)) {
             localTicketsData.tickets = localTicketsData.tickets.filter(t => t.id !== ticketId);
@@ -1223,17 +1374,13 @@ app.delete('/api/tickets/:id', async (req, res) => {
     }
 });
 
-// --- ROUTE PUBLIQUE (Avec secours hors-ligne RC-LOCALDATA et journalisation détaillée) ---
+// --- ROUTE PUBLIQUE ---
 app.post('/api/public-action', async (req, res) => {
     const { action, dataPayload } = req.body;
-    console.log(`[Public-Action] Action reçue : ${action}`, { dataPayload });
 
-    // Action : Récupération du nom de l'utilisateur
     if (action === 'GET_USER_NAME') {
         try {
             const identifier = dataPayload?.identifier?.trim().toLowerCase();
-            console.log(`[GET_USER_NAME] Recherche pour l'identifiant : "${identifier}"`);
-
             const hotelsSnapshot = await db.collection('hotels').get();
             let foundFullName = null;
 
@@ -1247,13 +1394,10 @@ app.post('/api/public-action', async (req, res) => {
                     const data = userDocSnap.data();
                     usersList = Array.isArray(data.users) ? data.users : Object.values(data);
                     saveToLocalMirror(hotelId, 'config', 'users', data);
-                    console.log(`[GET_USER_NAME] [Hotel: ${hotelId}] Utilisateurs récupérés depuis Firestore.`);
                 } else {
-                    console.log(`[GET_USER_NAME] [Hotel: ${hotelId}] Document Firestore absent, tentative de lecture du miroir local...`);
                     const localData = readFromLocalMirror(hotelId, 'config', 'users');
                     if (localData && Array.isArray(localData.users)) {
                         usersList = localData.users;
-                        console.log(`[GET_USER_NAME] [Hotel: ${hotelId}] Utilisateurs récupérés depuis le miroir local.`);
                     }
                 }
 
@@ -1266,7 +1410,6 @@ app.post('/api/public-action', async (req, res) => {
 
                 if (matchedUser) {
                     foundFullName = matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim();
-                    console.log(`[GET_USER_NAME] Utilisateur trouvé dans l'hôtel ${hotelId} :`, foundFullName);
                     break;
                 }
             }
@@ -1274,11 +1417,9 @@ app.post('/api/public-action', async (req, res) => {
             if (foundFullName) {
                 return res.json({ success: true, fullName: foundFullName });
             } else {
-                console.log(`[GET_USER_NAME] Utilisateur non trouvé pour l'identifiant : "${identifier}" dans Firestore.`);
                 return res.json({ success: false, message: "Utilisateur non trouvé" });
             }
         } catch (err) {
-            console.error(`[GET_USER_NAME] Erreur Firestore, basculement en mode hors-ligne global :`, err);
             const hotelsDir = path.join(LOCAL_DATA_ROOT, 'hotels');
             const identifier = dataPayload?.identifier?.trim().toLowerCase();
             let foundFullName = null;
@@ -1296,7 +1437,6 @@ app.post('/api/public-action', async (req, res) => {
                         );
                         if (matchedUser) {
                             foundFullName = matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim();
-                            console.log(`[GET_USER_NAME] [OFFLINE] Utilisateur trouvé dans l'hôtel ${hId} (miroir) :`, foundFullName);
                             break;
                         }
                     }
@@ -1306,19 +1446,14 @@ app.post('/api/public-action', async (req, res) => {
             if (foundFullName) {
                 return res.json({ success: true, fullName: foundFullName, source: 'RC-LOCALDATA-OFFLINE' });
             }
-            console.warn(`[GET_USER_NAME] [OFFLINE] Données locales introuvables pour : "${identifier}"`);
             return res.status(500).json({ success: false, message: "Erreur serveur et données locales introuvables" });
         }
     }
 
-    // Action : Demande de réinitialisation de mot de passe par e-mail avec Token sécurisé
     if (action === 'REQUEST_PASSWORD_RESET') {
         try {
             const identifier = dataPayload?.identifier?.trim().toLowerCase();
-            console.log(`[REQUEST_PASSWORD_RESET] Demande reçue pour l'identifiant : "${identifier}"`);
-
             if (!identifier) {
-                console.warn(`[REQUEST_PASSWORD_RESET] Identifiant manquant dans le payload.`);
                 return res.json({ success: false, message: "Identifiant manquant." });
             }
 
@@ -1351,7 +1486,6 @@ app.post('/api/public-action', async (req, res) => {
 
                 if (matchedUser) {
                     targetHotelId = hotelId;
-                    console.log(`[REQUEST_PASSWORD_RESET] Utilisateur ciblé trouvé dans l'hôtel : ${hotelId}`);
                     break;
                 }
             }
@@ -1360,15 +1494,12 @@ app.post('/api/public-action', async (req, res) => {
             const primaryUserId = matchedUser ? (matchedUser.id || matchedUser.uid) : null;
 
             if (!matchedUser || !targetHotelId || !userIdentifier) {
-                console.warn(`[REQUEST_PASSWORD_RESET] Aucun compte ne correspond à l'identifiant : "${identifier}". Réponse neutre renvoyée par sécurité.`);
                 return res.json({ success: true, message: "Si le compte existe, un e-mail a été envoyé." });
             }
 
-            const crypto = require('crypto');
             const resetToken = crypto.randomBytes(32).toString('hex');
-            const tokenExpiration = Date.now() + 1800000; // +30 minutes (contre le délai de la sandbox Trend Micro)
+            const tokenExpiration = Date.now() + 1800000;
 
-            // 1. Enregistrement pour la vérification du token (passwordResets)
             const resetDocRef = db.collection('hotels').doc(targetHotelId).collection('config').doc('passwordResets');
             const resetDocSnap = await resetDocRef.get();
             let resets = resetDocSnap.exists ? (resetDocSnap.data().resets || []) : [];
@@ -1383,9 +1514,7 @@ app.post('/api/public-action', async (req, res) => {
             });
             await resetDocRef.set({ resets, updatedAt: new Date().toISOString() });
             saveToLocalMirror(targetHotelId, 'config', 'passwordResets', { resets });
-            console.log(`[REQUEST_PASSWORD_RESET] Token de réinitialisation enregistré pour l'utilisateur ID: ${primaryUserId}`);
 
-            // 2. Enregistrement pour la notification admin (passwordRequests)
             const reqDocRef = db.collection('hotels').doc(targetHotelId).collection('config').doc('passwordRequests');
             const reqDocSnap = await reqDocRef.get();
             let requests = reqDocSnap.exists ? (reqDocSnap.data().requests || []) : [];
@@ -1401,7 +1530,6 @@ app.post('/api/public-action', async (req, res) => {
             const requestPayload = { requests, updatedAt: new Date().toISOString() };
             await reqDocRef.set(requestPayload);
             saveToLocalMirror(targetHotelId, 'config', 'passwordRequests', requestPayload);
-            console.log(`[REQUEST_PASSWORD_RESET] Notification de demande de mot de passe ajoutée pour l'admin.`);
 
             const origin = req.headers.origin || req.headers.referer || '';
             let frontendBaseUrl = 'http://localhost:3000';
@@ -1411,61 +1539,26 @@ app.post('/api/public-action', async (req, res) => {
             }
 
             const resetLink = `${frontendBaseUrl}/login.html?reset=true&token=${resetToken}&hotelId=${targetHotelId}`;
-
-            // 🚀 Envoi de l'e-mail via l'API HTTP de Brevo (Port 443 - Non bloqué par Render) avec ton template d'origine
             const userName = matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim() || matchedUser.username || 'Utilisateur';
 
             const htmlContent = `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-                    
-                    <!-- En-tête centré avec un vrai centrage parfait du logo -->
                     <div style="background-color: #0f172a; padding: 25px 20px; text-align: center;">
-                        <table align="center" cellpadding="0" cellspacing="0" style="margin: 0 auto;">
-                            <tr>
-                                <td style="vertical-align: middle; text-align: center;">
-                                    <div style="background-color: #ffffff; width: 44px; height: 44px; border-radius: 10px; display: inline-block; vertical-align: middle; box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: center;">
-                                        <!-- Table interne pour forcer le centrage parfait vertical et horizontal -->
-                                        <table width="100%" height="44" cellpadding="0" cellspacing="0">
-                                            <tr>
-                                                <td align="center" valign="middle" style="height: 44px; line-height: 44px;">
-                                                    <img src="https://roomcheck.centillion.online/IT_RoomCheck.png" alt="Logo" style="width: 32px; height: 32px; display: block; margin: 0 auto;" />
-                                                </td>
-                                            </tr>
-                                        </table>
-                                    </div>
-                                </td>
-                                <td style="vertical-align: middle; padding-left: 14px; text-align: left;">
-                                    <span style="color: #ffffff; font-size: 20px; font-weight: bold; font-family: Arial, sans-serif; display: inline-block; vertical-align: middle;">RoomCheck Security</span>
-                                </td>
-                            </tr>
-                        </table>
+                        <span style="color: #ffffff; font-size: 20px; font-weight: bold;">RoomCheck Security</span>
                     </div>
-
-                    <!-- Corps du message -->
                     <div style="padding: 30px 25px;">
                         <p style="color: #334155; font-size: 15px; line-height: 1.5; margin-top: 0;">Bonjour <strong>${userName}</strong>,</p>
                         <p style="color: #334155; font-size: 15px; line-height: 1.5;">Une demande de réinitialisation de mot de passe a été effectuée pour votre compte.</p>
                         <p style="color: #334155; font-size: 15px; line-height: 1.5;">Ce lien est sécurisé et valide pendant <strong>30 minutes</strong> :</p>
-                        
-                        <!-- Bouton d'action -->
                         <div style="text-align: center; margin: 35px 0;">
-                            <a href="${resetLink}" style="background-color: #0d9488; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; box-shadow: 0 4px 6px rgba(13, 148, 136, 0.2);">Réinitialiser mon mot de passe</a>
+                            <a href="${resetLink}" style="background-color: #0d9488; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">Réinitialiser mon mot de passe</a>
                         </div>
-                        
-                        <!-- Avertissement -->
-                        <p style="font-size: 13px; color: #64748b; text-align: center; line-height: 1.4; margin-top: 25px;">Si vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail en toute sécurité.</p>
-                        
-                        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 25px 0;">
-                        
-                        <!-- Pied de page -->
-                        <p style="font-size: 12px; color: #94a3b8; text-align: center; font-weight: bold; letter-spacing: 0.5px; margin: 0;">RoomCheck - Centillion.Online</p>
+                        <p style="font-size: 13px; color: #64748b; text-align: center; line-height: 1.4; margin-top: 25px;">Si vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail.</p>
                     </div>
                 </div>
             `;
 
-            const textContent = `Bonjour ${userName},\n\nUne demande de réinitialisation de mot de passe a été effectuée pour votre compte.\n\nCopiez ce lien pour réinitialiser votre mot de passe (valide 30 minutes) :\n${resetLink}\n\nSi vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail.\n\nRoomCheck - Centillion.Online`;
-
-            const brevoResponse = await fetch('https://api.brevo.com/v3/smtp/email', {
+            await fetch('https://api.brevo.com/v3/smtp/email', {
                 method: 'POST',
                 headers: {
                     'accept': 'application/json',
@@ -1473,39 +1566,25 @@ app.post('/api/public-action', async (req, res) => {
                     'content-type': 'application/json'
                 },
                 body: JSON.stringify({
-                    sender: {
-                        name: "RoomCheck Sécurité",
-                        email: "noreply@centillion.online"
-                    },
+                    sender: { name: "RoomCheck Sécurité", email: "noreply@centillion.online" },
                     to: [{ email: userIdentifier }],
                     subject: "Réinitialisation de votre mot de passe - RoomCheck",
                     htmlContent: htmlContent,
-                    textContent: textContent
+                    textContent: `Bonjour ${userName},\n\nRéinitialisez votre mot de passe via ce lien (valide 30 min) :\n${resetLink}`
                 })
             });
 
-            if (!brevoResponse.ok) {
-                const errorData = await brevoResponse.json();
-                console.error(`[REQUEST_PASSWORD_RESET] Erreur API Brevo:`, errorData);
-                return res.status(500).json({ success: false, message: "Échec de l'envoi de l'e-mail de réinitialisation." });
-            }
-
-            console.log(`[REQUEST_PASSWORD_RESET] E-mail de réinitialisation envoyé avec succès via l'API Brevo à : ${userIdentifier}`);
             return res.json({ success: true, message: "E-mail de réinitialisation envoyé avec succès." });
         } catch (err) {
-            console.error(`[REQUEST_PASSWORD_RESET] Erreur lors de la demande de réinitialisation :`, err);
+            console.error(`[REQUEST_PASSWORD_RESET] Erreur :`, err);
             return res.status(500).json({ success: false, message: "Erreur serveur" });
         }
     }
 
-    // --- Action : Vérification du token de réinitialisation e-mail ---
     if (action === 'VERIFY_RESET_TOKEN') {
         try {
             const { token, hotelId } = dataPayload || {};
-            console.log(`[VERIFY_RESET_TOKEN] Vérification du token pour l'hôtel ID: ${hotelId}`);
-
             if (!token || !hotelId) {
-                console.warn(`[VERIFY_RESET_TOKEN] Paramètres manquants (token ou hotelId).`);
                 return res.json({ success: false, message: "Paramètres manquants." });
             }
 
@@ -1524,7 +1603,6 @@ app.post('/api/public-action', async (req, res) => {
 
             const activeReset = resets.find(r => r.token === token && r.expiresAt > Date.now());
             if (!activeReset) {
-                console.warn(`[VERIFY_RESET_TOKEN] Token invalide ou expiré.`);
                 return res.json({ success: false, message: "Lien de réinitialisation invalide ou expiré." });
             }
 
@@ -1550,56 +1628,38 @@ app.post('/api/public-action', async (req, res) => {
             });
             
             if (!matchedUser) {
-                console.warn(`[VERIFY_RESET_TOKEN] Utilisateur associé au token introuvable dans l'hôtel.`);
                 return res.json({ success: false, message: "Utilisateur introuvable." });
             }
 
             const userId = matchedUser.id || matchedUser.uid;
             const fullName = matchedUser.fullName || matchedUser.displayName || `${matchedUser.prenom || ''} ${matchedUser.nom || ''}`.trim() || matchedUser.username || 'Collaborateur';
 
-            console.log(`[VERIFY_RESET_TOKEN] Token valide pour l'utilisateur : ${fullName} (${userId})`);
-            return res.json({ 
-                success: true, 
-                userId: userId, 
-                fullName: fullName 
-            });
-
+            return res.json({ success: true, userId: userId, fullName: fullName });
         } catch (err) {
-            console.error(`[VERIFY_RESET_TOKEN] Erreur serveur lors de la vérification du token :`, err);
             return res.status(500).json({ success: false, message: "Erreur serveur" });
         }
     }
 
-    // --- Action : Mise à jour effective du mot de passe et nettoyage multi-critères ---
     if (action === 'UPDATE_PASSWORD') {
         try {
             const { token, hotelId, newPassword } = dataPayload || {};
-            console.log(`[UPDATE_PASSWORD] Tentative de mise à jour du mot de passe pour l'hôtel ID: ${hotelId}`);
-            
             if (!token || !hotelId || !newPassword) {
-                console.warn(`[UPDATE_PASSWORD] Paramètres manquants pour la mise à jour.`);
                 return res.json({ success: false, message: "Paramètres manquants pour la mise à jour." });
             }
 
-            // 1. Vérifier le token dans passwordResets
             const resetDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('passwordResets');
             const resetDocSnap = await resetDocRef.get();
             let resets = resetDocSnap.exists ? (resetDocSnap.data().resets || []) : [];
 
             const activeReset = resets.find(r => r.token === token && r.expiresAt > Date.now());
             if (!activeReset) {
-                console.warn(`[UPDATE_PASSWORD] Jeton de réinitialisation invalide ou expiré.`);
                 return res.json({ success: false, message: "Jeton de réinitialisation invalide ou expiré." });
             }
 
             const targetUserId = activeReset.userId;
             const targetEmail = activeReset.email ? activeReset.email.toLowerCase() : null;
 
-            // 2. Hasher le nouveau mot de passe avec bcrypt
-            const bcrypt = require('bcrypt');
             const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-            // 3. Mettre à jour le tableau des utilisateurs dans Firestore
             const usersDocRef = db.collection('hotels').doc(hotelId).collection('config').doc('users');
             const usersDocSnap = await usersDocRef.get();
 
@@ -1625,10 +1685,8 @@ app.post('/api/public-action', async (req, res) => {
                 const updatedUserData = { users: usersList, updatedAt: new Date().toISOString() };
                 await usersDocRef.set(updatedUserData);
                 saveToLocalMirror(hotelId, 'config', 'users', updatedUserData);
-                console.log(`[UPDATE_PASSWORD] Mot de passe mis à jour dans Firestore pour l'utilisateur ID: ${targetUserId}`);
             }
 
-            // 4. Nettoyage multi-critères de la notification admin et des resets
             resets = resets.filter(r => r.token !== token);
             await resetDocRef.set({ resets, updatedAt: new Date().toISOString() });
             saveToLocalMirror(hotelId, 'config', 'passwordResets', { resets });
@@ -1638,38 +1696,31 @@ app.post('/api/public-action', async (req, res) => {
             
             if (reqDocSnap.exists) {
                 let requests = reqDocSnap.data().requests || [];
-                
                 requests = requests.filter(r => {
                     if (!r) return false;
                     const rId = r.userId;
                     const rIdentifier = (r.identifier || '').toLowerCase();
-
                     const matchId = targetUserId && rId === targetUserId;
                     const matchEmail = (targetEmail && rIdentifier === targetEmail) || (matchedUserEmail && rIdentifier === matchedUserEmail);
-
                     return !(matchId || matchEmail);
                 });
                 
                 const requestPayload = { requests, updatedAt: new Date().toISOString() };
                 await reqDocRef.set(requestPayload);
                 saveToLocalMirror(hotelId, 'config', 'passwordRequests', requestPayload);
-                console.log(`[UPDATE_PASSWORD] Demandes de réinitialisation administratives nettoyées pour l'utilisateur.`);
             }
 
-            return res.json({ success: true, message: "Mot de passe mis à jour avec succès et notification effacée." });
-
+            return res.json({ success: true, message: "Mot de passe mis à jour avec succès." });
         } catch (err) {
-            console.error(`[UPDATE_PASSWORD] Erreur serveur lors de la mise à jour du mot de passe :`, err);
             return res.status(500).json({ success: false, message: "Erreur serveur lors de la mise à jour." });
         }
     }
 
-    console.warn(`[Public-Action] Action publique non reconnue : "${action}"`);
     return res.status(400).json({ success: false, message: "Action publique non reconnue." });
 });
 
 // ==========================================
-// MIDDLEWARE SÉCURITÉ (SILENCIEUX CÔTÉ NAVIGATEUR - HTTP 200 + Miroir Local)
+// MIDDLEWARE SÉCURITÉ
 // ==========================================
 async function verifierPermissionServeur(req, res, next) {
     const body = req.body || {};
@@ -1702,11 +1753,9 @@ async function verifierPermissionServeur(req, res, next) {
             if (userDoc.exists) {
                 configData = userDoc.data();
                 usersList = Array.isArray(configData.users) ? configData.users : [];
-                // 🌟 Sauvegarde automatique dans le miroir local
                 saveToLocalMirror(hotelId, 'config', 'users', configData);
             }
         } catch (cloudErr) {
-            console.warn("⚠️ Cloud injoignable dans le middleware, lecture du miroir local RC-LOCALDATA...");
             const localData = readFromLocalMirror(hotelId, 'config', 'users');
             if (localData) {
                 configData = localData;
@@ -1731,7 +1780,6 @@ async function verifierPermissionServeur(req, res, next) {
         }
 
         const rawRoleFromDb = realUser.role || realUser.roles || '';
-        
         let realUserRolesList = [];
         if (typeof rawRoleFromDb === 'string') {
             realUserRolesList = rawRoleFromDb.split(',').map(r => r.trim().toLowerCase()).filter(r => r.length > 0);
@@ -1746,11 +1794,7 @@ async function verifierPermissionServeur(req, res, next) {
             const isFrontRoleValid = frontRolesList.every(fRole => realUserRolesList.includes(fRole));
 
             if (!isFrontRoleValid) {
-                return res.json({ 
-                    success: false, 
-                    code: 403,
-                    message: "Accès refusé." 
-                });
+                return res.json({ success: false, code: 403, message: "Accès refusé." });
             }
         }
 
@@ -1760,10 +1804,8 @@ async function verifierPermissionServeur(req, res, next) {
                 : [String(requiredRole).trim().toLowerCase()];
 
             let allowed = false;
-
             const hasCashier = realUserRolesList.includes('f&b cashier');
             const hasManager = realUserRolesList.includes('f&b manager');
-
             const isCashierRequired = requiredArray.some(r => r === 'f&b cashier');
             const isManagerRequired = requiredArray.some(r => r === 'f&b manager');
 
@@ -1778,11 +1820,7 @@ async function verifierPermissionServeur(req, res, next) {
             }
 
             if (!allowed) {
-                return res.json({ 
-                    success: false, 
-                    code: 403,
-                    message: "Accès refusé pour ce profil." 
-                });
+                return res.json({ success: false, code: 403, message: "Accès refusé pour ce profil." });
             }
         }
 
@@ -1792,13 +1830,12 @@ async function verifierPermissionServeur(req, res, next) {
         next();
 
     } catch (error) {
-        console.error("Erreur controle acces:", error);
         return res.json({ success: false, code: 500, message: "Une erreur est survenue." });
     }
 }
 
 // ==========================================
-// GESTION CONFIGURATION DYNAMIQUE (Avec Miroir & Fallback)
+// CONFIGURATION DYNAMIQUE
 // ==========================================
 app.get('/api/admin/config/:configDoc', verifierPermissionServeur, async (req, res) => {
     const { configDoc } = req.params;
@@ -1809,11 +1846,7 @@ app.get('/api/admin/config/:configDoc', verifierPermissionServeur, async (req, r
     }
 
     try {
-        const docSnap = await db.collection("hotels")
-            .doc(hotelId)
-            .collection("config")
-            .doc(configDoc)
-            .get();
+        const docSnap = await db.collection("hotels").doc(hotelId).collection("config").doc(configDoc).get();
 
         if (!docSnap.exists) {
             const localData = readFromLocalMirror(hotelId, 'config', configDoc);
@@ -1825,7 +1858,6 @@ app.get('/api/admin/config/:configDoc', verifierPermissionServeur, async (req, r
         saveToLocalMirror(hotelId, 'config', configDoc, data);
         return res.json({ success: true, ...data });
     } catch (err) {
-        console.warn(`⚠️ Cloud injoignable pour config/${configDoc}, bascule sur le miroir local...`);
         const localData = readFromLocalMirror(hotelId, 'config', configDoc);
         if (localData) {
             return res.json({ success: true, ...localData, source: 'RC-LOCALDATA-OFFLINE' });
@@ -1849,25 +1881,15 @@ app.post('/api/admin/config/:configDoc', verifierPermissionServeur, async (req, 
             updatedAt: new Date().toISOString()
         };
 
-        await db.collection("hotels")
-            .doc(hotelId)
-            .collection("config")
-            .doc(configDoc)
-            .set(payload, { merge: true });
-
-        // 🌟 Synchro miroir local immédiate
+        await db.collection("hotels").doc(hotelId).collection("config").doc(configDoc).set(payload, { merge: true });
         saveToLocalMirror(hotelId, 'config', configDoc, payload);
 
         return res.json({ success: true, message: `Configuration ${configDoc} sauvegardée.` });
     } catch (err) {
-        console.error(`Erreur POST config/${configDoc}:`, err);
         return res.status(500).json({ success: false, message: "Erreur lors de la sauvegarde." });
     }
 });
 
-// ==========================================
-// ROUTE EXPLICITE POUR LES DÉPARTEMENTS (Avec Miroir & Fallback)
-// ==========================================
 app.get('/api/admin/config/departement', verifierPermissionServeur, async (req, res) => {
     const hotelId = req.targetHotelId || req.query.hotelId;
     if (!hotelId) {
@@ -1875,11 +1897,7 @@ app.get('/api/admin/config/departement', verifierPermissionServeur, async (req, 
     }
 
     try {
-        const docSnap = await db.collection("hotels")
-            .doc(hotelId)
-            .collection("config")
-            .doc("departement")
-            .get();
+        const docSnap = await db.collection("hotels").doc(hotelId).collection("config").doc("departement").get();
 
         if (!docSnap.exists) {
             const localData = readFromLocalMirror(hotelId, 'config', 'departement');
@@ -1910,30 +1928,21 @@ app.post('/api/admin/config/departement', verifierPermissionServeur, async (req,
             updatedAt: new Date().toISOString()
         };
 
-        await db.collection("hotels")
-            .doc(hotelId)
-            .collection("config")
-            .doc("departement")
-            .set(payload, { merge: true });
-
+        await db.collection("hotels").doc(hotelId).collection("config").doc("departement").set(payload, { merge: true });
         saveToLocalMirror(hotelId, 'config', 'departement', payload);
 
         return res.json({ success: true, message: "Configuration départements sauvegardée." });
     } catch (err) {
-        console.error("Erreur POST config/departement:", err);
         return res.status(500).json({ success: false, message: "Erreur lors de la sauvegarde." });
     }
 });
 
 // ==========================================
-// ROUTE GÉNÉRIQUE EXÉCUTION ACTIONS DB (Avec Miroir & Fallback)
+// EXÉCUTION ACTIONS DB
 // ==========================================
 app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) => {
-    console.log("📥 Requête reçue sur /api/execute-db-action - Body complet :", req.body);
-
     const { action, collectionName, docId } = req.body;
     
-    // Récupération ultra tolérante du payload (qu'il soit structuré dans dataPayload ou envoyé directement à plat)
     const dataPayload = req.body.dataPayload || (() => {
         const copy = { ...req.body };
         delete copy.action;
@@ -1963,7 +1972,6 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
             }
             return res.json({ success: true, requests });
         } catch (err) {
-            console.warn("⚠️ Cloud injoignable pour GET_PASSWORD_REQUESTS, lecture miroir local...");
             const localData = readFromLocalMirror(hotelId, 'config', 'passwordRequests');
             if (localData && localData.requests) {
                 return res.json({ success: true, requests: localData.requests, source: 'RC-LOCALDATA-OFFLINE' });
@@ -1997,7 +2005,6 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
                 }
             });
         } catch (err) {
-            console.error("Erreur GET_EXPORT_METADATA:", err);
             return res.status(500).json({ success: false, message: "Erreur récupération métadonnées." });
         }
     }
@@ -2005,7 +2012,6 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
     if (collectionName === 'config' && docId === 'users' && action === 'UPDATE_SINGLE_USER') {
         try {
             const { userId, updateData } = dataPayload || {};
-            
             const docRef = db.collection('hotels').doc(hotelId).collection('config').doc('users');
             const docSnap = await docRef.get();
             
@@ -2037,13 +2043,11 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
 
             return res.json({ success: true, users: users });
         } catch (err) {
-            console.error("Erreur UPDATE_SINGLE_USER:", err);
             return res.status(500).json({ success: false, message: "Erreur serveur lors de la mise à jour de l'utilisateur." });
         }
     }
 
     if (!action || !collectionName || !hotelId) {
-        console.warn("⚠️ Paramètres manquants détectés :", { action, collectionName, hotelId });
         return res.status(400).json({ success: false, message: "Champs action, collectionName et hotelId requis." });
     }
 
@@ -2056,19 +2060,11 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
 
         if (action === 'DELETE') {
             await collectionRef.doc(docId).delete();
-            
-            if (typeof deleteFromLocalMirror === 'function') {
-                deleteFromLocalMirror(hotelId, collectionName, docId);
-            } else {
-                saveToLocalMirror(hotelId, collectionName, docId, { deleted: true, deletedAt: new Date().toISOString() });
-            }
-
+            saveToLocalMirror(hotelId, collectionName, docId, { deleted: true, deletedAt: new Date().toISOString() });
             return res.json({ success: true, message: "Suppression effectuée avec succès." });
         } 
         else if (action === 'UPDATE') {
             let finalPayload = dataPayload || {};
-
-            // 🌟 SÉCURITÉ : Forcer isFirstLogin pour chaque utilisateur si on met à jour config/users
             if (collectionName === 'config' && docId === 'users' && finalPayload.users && Array.isArray(finalPayload.users)) {
                 finalPayload.users = finalPayload.users.map(u => ({
                     ...u,
@@ -2077,18 +2073,13 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
             }
 
             await collectionRef.doc(docId).set(finalPayload, { merge: true });
-            
             saveToLocalMirror(hotelId, collectionName, docId, finalPayload);
-
             return res.json({ success: true, message: "Mise à jour effectuée avec succès." });
         }
-
         else if (action === 'SET') {
             const finalDocId = docId || `doc_${Date.now()}`;
             await collectionRef.doc(finalDocId).set(dataPayload || {}, { merge: true });
-            
             saveToLocalMirror(hotelId, collectionName, finalDocId, dataPayload);
-
             return res.json({ success: true, message: "Enregistrement (SET) effectué avec succès.", docId: finalDocId });
         }
         else if (action === 'GET') {
@@ -2113,19 +2104,16 @@ app.post('/api/execute-db-action', verifierPermissionServeur, async (req, res) =
         else if (action === 'CREATE') {
             const finalDocId = docId || `doc_${Date.now()}`;
             await collectionRef.doc(finalDocId).set(dataPayload || {});
-            
             saveToLocalMirror(hotelId, collectionName, finalDocId, dataPayload);
-
             return res.json({ success: true, message: "Création effectuée avec succès.", docId: finalDocId });
         }
 
         return res.status(400).json({ success: false, message: "Action non reconnue." });
     } catch (err) {
-        console.error("Erreur execute-db-action:", err);
         return res.status(500).json({ success: false, message: "Erreur serveur lors de l'opération." });
     }
 });
-// Récupérer les informations d'un hôtel par son ID
+
 app.get('/api/hotels/:id', async (req, res) => {
     try {
         const doc = await db.collection('hotels').doc(req.params.id).get();
@@ -2137,9 +2125,7 @@ app.get('/api/hotels/:id', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-// ==========================================
-// MISE À JOUR DU PREMIER MOT DE PASSE (Compatible config/users)
-// ==========================================
+
 app.post('/api/admin/users/update-first-login-password', async (req, res) => {
     try {
         const { hotelId, userId, oldPassword, newPassword } = req.body;
@@ -2165,7 +2151,6 @@ app.post('/api/admin/users/update-first-login-password', async (req, res) => {
         const targetUser = users[index];
         const pwdToCompare = targetUser.password || targetUser.passwordHash || '';
 
-        // 🛡️ Vérification sécurisée de l'ancien mot de passe via bcrypt
         let isOldPasswordValid = false;
         if (typeof bcrypt !== 'undefined' && bcrypt.compareSync) {
             isOldPasswordValid = bcrypt.compareSync(oldPassword, pwdToCompare);
@@ -2177,12 +2162,10 @@ app.post('/api/admin/users/update-first-login-password', async (req, res) => {
             return res.status(400).json({ success: false, message: "L'ancien mot de passe est incorrect." });
         }
 
-        // 🛑 Empêcher l'utilisateur de remettre exactement le même mot de passe
         if (oldPassword === newPassword.trim()) {
             return res.status(400).json({ success: false, message: "Le nouveau mot de passe doit être différent de l'ancien." });
         }
 
-        // Hachage sécurisé du nouveau mot de passe
         const hashedPassword = await bcrypt.hash(newPassword.trim(), 10);
 
         users[index] = {
@@ -2199,59 +2182,50 @@ app.post('/api/admin/users/update-first-login-password', async (req, res) => {
         return res.json({ success: true, message: "Mot de passe mis à jour avec succès." });
 
     } catch (error) {
-        // 🔒 Log neutre pour ne laisser aucune trace exploitable par un hacker
-        console.error("Erreur de sécurité lors du traitement du mot de passe.");
         return res.status(500).json({ success: false, message: "Erreur serveur interne." });
     }
 });
-// Route Express pour récupérer les réservations d'un hôtel de manière sécurisée
+
 app.get('/api/hotels/:hotelId/bookings', async (req, res) => {
     try {
         const { hotelId } = req.params;
         const userId = req.headers['x-user-id'];
 
-        // Optionnel : Vérification de sécurité avec le userId si nécessaire
         if (!userId) {
             return res.status(401).json({ error: "Utilisateur non authentifié." });
         }
 
-        // Récupération dynamique depuis la sous-collection Firestore
         const bookingsRef = db.collection('hotels').doc(hotelId).collection('bookings');
         const snapshot = await bookingsRef.get();
 
         const bookings = [];
-        const batch = db.batch(); // Permet de grouper les modifications Firestore pour optimiser
+        const batch = db.batch();
         let hasChanges = false;
-        const now = new Date(); // Heure actuelle du serveur
+        const now = new Date();
 
         snapshot.forEach(doc => {
             const data = doc.data();
             let currentStatus = data.status || 'RÉSERVÉE';
             let calculatedStatus = currentStatus;
 
-            // On s'assure d'avoir les dates de check-in et check-out valides
             const checkIn = data.checkIn ? new Date(data.checkIn) : null;
             const checkOut = data.checkOut ? new Date(data.checkOut) : null;
 
             if (checkIn && checkOut && !isNaN(checkIn) && !isNaN(checkOut)) {
-                // Logique intelligente d'évolution du statut en fonction du temps
                 if (now > checkOut) {
                     calculatedStatus = 'TERMINÉE';
                 } else if (now >= checkIn && now <= checkOut) {
                     calculatedStatus = 'OCCUPÉE';
                 } else if (now < checkIn) {
-                    // Si on est avant la date de check-in, on garde 'RÉSERVÉE' 
-                    // (sauf si un autre statut manuel spécifique existe)
                     if (currentStatus !== 'ANNULÉE') {
                         calculatedStatus = 'RÉSERVÉE';
                     }
                 }
 
-                // Si le statut calculé diffère de celui enregistré dans Firestore, on met à jour
                 if (calculatedStatus !== currentStatus) {
                     hasChanges = true;
                     batch.update(doc.ref, { status: calculatedStatus });
-                    data.status = calculatedStatus; // Met à jour l'objet renvoyé immédiatement
+                    data.status = calculatedStatus;
                 }
             }
 
@@ -2261,14 +2235,12 @@ app.get('/api/hotels/:hotelId/bookings', async (req, res) => {
             });
         });
 
-        // Si des statuts ont évolué avec le temps, on valide les modifications dans Firestore
         if (hasChanges) {
             await batch.commit();
         }
 
         res.status(200).json(bookings);
     } catch (error) {
-        console.error("Erreur serveur lors de la récupération des bookings:", error);
         res.status(500).json({ error: "Erreur interne du serveur." });
     }
 });
@@ -2276,22 +2248,15 @@ app.get('/api/hotels/:hotelId/bookings', async (req, res) => {
 app.post('/api/verify-session', async (req, res) => {
     try {
         const { token } = req.body;
-        
         if (!token) {
             return res.json({ valid: false, message: "Token manquant." });
         }
 
-        // On parcourt les hôtels pour trouver l'utilisateur qui possède ce sessionToken
         const hotelsSnapshot = await db.collection('hotels').get();
         let matchedUser = null;
-        let matchedHotelId = null;
 
         for (const hotelDoc of hotelsSnapshot.docs) {
-            const userDoc = await db.collection('hotels')
-                .doc(hotelDoc.id)
-                .collection('config')
-                .doc('users')
-                .get();
+            const userDoc = await db.collection('hotels').doc(hotelDoc.id).collection('config').doc('users').get();
 
             if (userDoc.exists) {
                 const data = userDoc.data();
@@ -2299,7 +2264,6 @@ app.post('/api/verify-session', async (req, res) => {
                 const found = usersArray.find(u => u.sessionToken === token);
                 if (found) {
                     matchedUser = found;
-                    matchedHotelId = hotelDoc.id;
                     break;
                 }
             }
@@ -2309,18 +2273,85 @@ app.post('/api/verify-session', async (req, res) => {
             return res.json({ valid: false, message: "Session introuvable ou expirée." });
         }
 
-        return res.json({ 
-            valid: true, 
-            role: matchedUser.role,
-            user: matchedUser 
-        });
+        return res.json({ valid: true, role: matchedUser.role, user: matchedUser });
     } catch (error) {
-        console.error("Erreur verify-session:", error);
         return res.status(500).json({ valid: false, error: error.message });
     }
 });
 
+// ==========================================
+// 📅 SYNCHRONISATION AUTOMATIQUE iCal (OTA)
+// ==========================================
+const ical = require('node-ical');
+const fetch = require('node-fetch');
 
+async function syncAllHotelsOtaCalendars() {
+    try {
+        const hotelsSnapshot = await db.collection('hotels').get();
+        
+        for (const hotelDoc of hotelsSnapshot.docs) {
+            const hotelId = hotelDoc.id;
+            const hotelData = hotelDoc.data();
+            const otaConfig = hotelData.otaSync;
+
+            if (!otaConfig || !otaConfig.enabled) continue;
+
+            const urlsToSync = [
+                { source: 'Booking.com', url: otaConfig.bookingIcalUrl },
+                { source: 'Expedia', url: otaConfig.expediaIcalUrl }
+            ];
+
+            const bookingsRef = db.collection('hotels').doc(hotelId).collection('bookings');
+
+            for (const item of urlsToSync) {
+                if (!item.url || item.url.trim() === '') continue;
+
+                try {
+                    const response = await fetch(item.url);
+                    if (!response.ok) continue;
+                    const textData = await response.text();
+                    const events = ical.sync.parseICS(textData);
+
+                    for (const k in events) {
+                        if (events[k].type === 'VEVENT') {
+                            const event = events[k];
+                            const uid = event.uid || crypto.createHash('md5').update((event.summary || '') + (event.start || '')).digest('hex');
+                            
+                            const checkIn = event.start ? new Date(event.start).toISOString() : null;
+                            const checkOut = event.end ? new Date(event.end).toISOString() : null;
+                            const summary = event.summary || 'Réservation OTA';
+
+                            if (!checkIn || !checkOut) continue;
+
+                            const docBookingRef = bookingsRef.doc(`ical_${uid}`);
+                            const docSnap = await docBookingRef.get();
+
+                            if (!docSnap.exists) {
+                                await docBookingRef.set({
+                                    clientName: summary,
+                                    roomNumber: "101",
+                                    checkIn: checkIn,
+                                    checkOut: checkOut,
+                                    status: "RÉSERVÉE",
+                                    source: item.source,
+                                    createdAt: new Date().toISOString()
+                                });
+                            }
+                        }
+                    }
+
+                    await hotelDoc.ref.update({ 'otaSync.lastSync': new Date().toISOString() });
+                } catch (err) {
+                    console.error(`[iCal Worker Erreur] Hôtel ${hotelId} (${item.source}):`, err.message);
+                }
+            }
+        }
+    } catch (error) {
+        console.error("[iCal Worker Erreur Critique]:", error);
+    }
+}
+
+setInterval(syncAllHotelsOtaCalendars, 30 * 60 * 1000);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
