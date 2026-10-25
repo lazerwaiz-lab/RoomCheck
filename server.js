@@ -162,29 +162,11 @@ const SUBSCRIPTION_PLANS = {
 };
 
 // ==========================================
-// 🎨 EN-TÊTE HTML STANDARDISE POUR LES EMAILS
+// 🎨 EN-TÊTE HTML STANDARDISE POUR LES EMAILS (Format: RoomCheck - Objet)
 // ==========================================
-const getStandardEmailHeader = (subtitle = '') => `
+const getStandardEmailHeader = (title = '') => `
     <div style="background-color: #0f172a; padding: 25px 20px; text-align: center;">
-        <table align="center" cellpadding="0" cellspacing="0" style="margin: 0 auto;">
-            <tr>
-                <td style="vertical-align: middle; text-align: center;">
-                    <div style="background-color: #ffffff; width: 44px; height: 44px; border-radius: 10px; display: inline-block; vertical-align: middle; box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: center;">
-                        <table width="100%" height="44" cellpadding="0" cellspacing="0">
-                            <tr>
-                                <td align="center" valign="middle" style="height: 44px; line-height: 44px;">
-                                    <img src="https://roomcheck.centillion.online/IT_RoomCheck.png" alt="Logo" style="width: 32px; height: 32px; display: block; margin: 0 auto;" />
-                                </td>
-                            </tr>
-                        </table>
-                    </div>
-                </td>
-                <td style="vertical-align: middle; padding-left: 14px; text-align: left;">
-                    <span style="color: #ffffff; font-size: 20px; font-weight: bold; font-family: Arial, sans-serif; display: inline-block; vertical-align: middle;">Room<span style="color: #48bdb2;">Check</span></span>
-                </td>
-            </tr>
-        </table>
-        ${subtitle ? `<p style="color: #94a3b8; font-size: 13px; margin: 10px 0 0 0; font-family: Arial, sans-serif;">${subtitle}</p>` : ''}
+        <span style="color: #ffffff; font-size: 20px; font-weight: bold; font-family: Arial, sans-serif;">Room<span style="color: #48bdb2;">Check</span>${title ? ` - ${title}` : ''}</span>
     </div>
 `;
 
@@ -349,7 +331,7 @@ app.post('/api/register-hotel', async (req, res) => {
 
             const htmlWelcomeContent = `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-                    ${getStandardEmailHeader()}
+                    ${getStandardEmailHeader('Bienvenue')}
                     <div style="padding: 30px 25px;">
                         <p style="color: #334155; font-size: 15px; line-height: 1.5; margin-top: 0;">Bonjour <strong>${adminName}</strong>,</p>
                         <p style="color: #334155; font-size: 15px; line-height: 1.5;">Félicitations ! Votre établissement <strong>${cleanName}</strong> a été créé avec succès.</p>
@@ -573,10 +555,10 @@ app.post('/api/login', async (req, res) => {
                             <p style="color: #64748b; font-size: 13px; line-height: 1.5;">Si vous êtes à l'origine de cette action, vous pouvez ignorer cet e-mail en toute sécurité.</p>
                             
                             <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 20px; margin: 25px auto 0 auto; max-width: 450px; text-align: center;">
-    <p style="color: #dc2626; font-size: 13px; font-weight: bold; margin: 0 0 8px 0;">Ce n'est pas vous ?</p>
-    <p style="color: #7f1d1d; font-size: 12px; margin: 0 0 15px 0; line-height: 1.4;">Si vous n'avez pas initié cette connexion, sécurisez votre compte immédiatement en réinitialisant votre mot de passe.</p>
-    <a href="${resetSecurityLink}" style="background-color: #dc2626; color: white; padding: 10px 20px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 12px; display: inline-block;">Sécuriser mon compte</a>
-</div>
+                                <p style="color: #dc2626; font-size: 13px; font-weight: bold; margin: 0 0 8px 0;">Ce n'est pas vous ?</p>
+                                <p style="color: #7f1d1d; font-size: 12px; margin: 0 0 15px 0; line-height: 1.4;">Si vous n'avez pas initié cette connexion, sécurisez votre compte immédiatement en réinitialisant votre mot de passe.</p>
+                                <a href="${resetSecurityLink}" style="background-color: #dc2626; color: white; padding: 10px 20px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 12px; display: inline-block;">Sécuriser mon compte</a>
+                            </div>
 
                             <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 25px 0;">
                             <p style="font-size: 12px; color: #94a3b8; text-align: center; font-weight: bold; margin: 0;">RoomCheck - Centillion.Online</p>
