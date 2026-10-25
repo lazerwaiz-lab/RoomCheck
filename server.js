@@ -162,11 +162,30 @@ const SUBSCRIPTION_PLANS = {
 };
 
 // ==========================================
-// 🎨 EN-TÊTE HTML STANDARDISE POUR LES EMAILS (Format: RoomCheck - Objet)
+// 🎨 EN-TÊTE HTML CONFORME : LOGO À GAUCHE + RoomCheck - OBJET (EN GRAS)
 // ==========================================
 const getStandardEmailHeader = (title = '') => `
-    <div style="background-color: #0f172a; padding: 25px 20px; text-align: center;">
-        <span style="color: #ffffff; font-size: 20px; font-weight: bold; font-family: Arial, sans-serif;">Room<span style="color: #48bdb2;">Check</span>${title ? ` - ${title}` : ''}</span>
+    <div style="background-color: #0f172a; padding: 20px; text-align: center;">
+        <table align="center" cellpadding="0" cellspacing="0" style="margin: 0 auto;">
+            <tr>
+                <td style="vertical-align: middle; text-align: center;">
+                    <div style="background-color: #ffffff; width: 40px; height: 40px; border-radius: 8px; display: inline-block; vertical-align: middle; text-align: center;">
+                        <table width="100%" height="40" cellpadding="0" cellspacing="0">
+                            <tr>
+                                <td align="center" valign="middle" style="height: 40px;">
+                                    <img src="https://roomcheck.centillion.online/IT_RoomCheck.png" alt="Logo" style="width: 28px; height: 28px; display: block; margin: 0 auto;" />
+                                </td>
+                            </tr>
+                        </table>
+                    </div>
+                </td>
+                <td style="vertical-align: middle; padding-left: 12px; text-align: left;">
+                    <span style="color: #ffffff; font-size: 20px; font-weight: bold; font-family: Arial, sans-serif; display: inline-block; vertical-align: middle;">
+                        Room<span style="color: #48bdb2;">Check</span>${title ? ` - <strong style="color: #ffffff;">${title}</strong>` : ''}
+                    </span>
+                </td>
+            </tr>
+        </table>
     </div>
 `;
 
@@ -382,10 +401,10 @@ app.post('/api/register-hotel', async (req, res) => {
 });
 
 // ==========================================
-// 2. ROUTE UNIQUE DE LOGIN (Avec Alerte Sécurité & Gestion d'Échecs)
+// 2. ROUTE UNIQUE DE LOGIN (SANS ENVOI PRÉMATURÉ D'E-MAIL)
 // ==========================================
 app.post('/api/login', async (req, res) => {
-    const { username, email, password, interfaceName } = req.body;
+    const { username, email, password } = req.body;
     const identifier = (username || email || '').trim().toLowerCase();
 
     if (!identifier || !password) {
@@ -525,67 +544,6 @@ app.post('/api/login', async (req, res) => {
         loginAttempts.finalLockout = false;
         await updateLoginAttemptsInDb(userDocRef, foundUser.id, loginAttempts, foundHotel.id);
 
-        // ✉️ ALERTE DE CONNEXION POUR LES RÔLES PRIVILÉGIÉS (Hors simple "user")
-        try {
-            const userRoleStr = (foundUser.role || '').toLowerCase();
-            if (userRoleStr && userRoleStr !== 'user' && !userRoleStr.includes('housekeeping')) {
-                const targetInterface = interfaceName || "l'interface RoomCheck";
-                const userEmail = foundUser.email || foundUser.username;
-                const userName = foundUser.fullName || foundUser.username || 'Collaborateur';
-                const loginTime = new Date().toLocaleString('fr-FR', { timeZone: 'Africa/Porto-Novo' });
-
-                const frontendBaseUrl = (req.headers.origin || req.headers.referer || '').includes('centillion.online') 
-                    ? 'https://roomcheck.centillion.online' 
-                    : 'http://localhost:3000';
-
-                const resetSecurityLink = `${frontendBaseUrl}/login.html`;
-
-                const htmlAlertContent = `
-                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-                        ${getStandardEmailHeader('Alerte Sécurité')}
-                        <div style="padding: 30px 25px;">
-                            <p style="color: #334155; font-size: 15px; line-height: 1.5; margin-top: 0;">Bonjour <strong>${userName}</strong>,</p>
-                            <p style="color: #334155; font-size: 15px; line-height: 1.5;">Une connexion à votre compte RoomCheck vient d'être effectuée avec succès.</p>
-                            
-                            <div style="background: #f8fafc; border-left: 4px solid #48bdb2; padding: 12px 16px; margin: 20px 0; font-size: 13px; color: #334155;">
-                                <strong>Interface ciblée :</strong> ${targetInterface}<br>
-                                <strong>Date / Heure :</strong> ${loginTime}
-                            </div>
-
-                            <p style="color: #64748b; font-size: 13px; line-height: 1.5;">Si vous êtes à l'origine de cette action, vous pouvez ignorer cet e-mail en toute sécurité.</p>
-                            
-                            <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 20px; margin: 25px auto 0 auto; max-width: 450px; text-align: center;">
-                                <p style="color: #dc2626; font-size: 13px; font-weight: bold; margin: 0 0 8px 0;">Ce n'est pas vous ?</p>
-                                <p style="color: #7f1d1d; font-size: 12px; margin: 0 0 15px 0; line-height: 1.4;">Si vous n'avez pas initié cette connexion, sécurisez votre compte immédiatement en réinitialisant votre mot de passe.</p>
-                                <a href="${resetSecurityLink}" style="background-color: #dc2626; color: white; padding: 10px 20px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 12px; display: inline-block;">Sécuriser mon compte</a>
-                            </div>
-
-                            <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 25px 0;">
-                            <p style="font-size: 12px; color: #94a3b8; text-align: center; font-weight: bold; margin: 0;">RoomCheck - Centillion.Online</p>
-                        </div>
-                    </div>
-                `;
-
-                await fetch('https://api.brevo.com/v3/smtp/email', {
-                    method: 'POST',
-                    headers: {
-                        'accept': 'application/json',
-                        'api-key': process.env.BREVO_SMTP_PASS,
-                        'content-type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        sender: { name: "RoomCheck Security", email: "noreply@centillion.online" },
-                        to: [{ email: userEmail }],
-                        subject: "Alerte de connexion à votre compte RoomCheck",
-                        htmlContent: htmlAlertContent,
-                        textContent: `Bonjour ${userName},\n\nUne connexion à votre compte vient d'être effectuée sur l'interface : ${targetInterface} (${loginTime}).\n\nSi ce n'est pas vous, rendez-vous ici pour réinitialiser votre mot de passe : ${resetSecurityLink}`
-                    })
-                });
-            }
-        } catch (alertErr) {
-            console.error("[Login Alert] Erreur lors de l'envoi de l'alerte de connexion :", alertErr);
-        }
-
         const sessionToken = crypto.randomBytes(32).toString('hex');
         foundUser.sessionToken = sessionToken;
 
@@ -622,6 +580,101 @@ app.post('/api/login', async (req, res) => {
     } catch (error) {
         console.error('Erreur Critique Login:', error);
         return res.status(500).json({ success: false, message: 'Erreur interne du serveur lors de la connexion.' });
+    }
+});
+
+// ==========================================
+// ✉️ ROUTE DE TRACAGE DU CLIC SUR L'INTERFACE (ENVOI DE L'E-ALERTE)
+// ==========================================
+app.post('/api/log-interface-access', async (req, res) => {
+    const { token, interfaceName } = req.body;
+
+    if (!token || !interfaceName) {
+        return res.status(400).json({ success: false, message: "Token ou nom d'interface manquant." });
+    }
+
+    try {
+        const hotelsSnapshot = await db.collection('hotels').get();
+        let matchedUser = null;
+
+        for (const hotelDoc of hotelsSnapshot.docs) {
+            const userDoc = await db.collection('hotels').doc(hotelDoc.id).collection('config').doc('users').get();
+
+            if (userDoc.exists) {
+                const data = userDoc.data();
+                const usersArray = data.users || [];
+                const found = usersArray.find(u => u.sessionToken === token);
+                if (found) {
+                    matchedUser = found;
+                    break;
+                }
+            }
+        }
+
+        if (!matchedUser) {
+            return res.status(401).json({ success: false, message: "Session invalide." });
+        }
+
+        const userRoleStr = (matchedUser.role || '').toLowerCase();
+        
+        if (userRoleStr && userRoleStr !== 'user' && !userRoleStr.includes('housekeeping')) {
+            const userEmail = matchedUser.email || matchedUser.username;
+            const userName = matchedUser.fullName || matchedUser.username || 'Collaborateur';
+            const loginTime = new Date().toLocaleString('fr-FR', { timeZone: 'Africa/Porto-Novo' });
+
+            const frontendBaseUrl = (req.headers.origin || req.headers.referer || '').includes('centillion.online') 
+                ? 'https://roomcheck.centillion.online' 
+                : 'http://localhost:3000';
+
+            const resetSecurityLink = `${frontendBaseUrl}/login.html`;
+
+            const htmlAlertContent = `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+                    ${getStandardEmailHeader('Alerte Sécurité')}
+                    <div style="padding: 30px 25px;">
+                        <p style="color: #334155; font-size: 15px; line-height: 1.5; margin-top: 0;">Bonjour <strong>${userName}</strong>,</p>
+                        <p style="color: #334155; font-size: 15px; line-height: 1.5;">Vous venez d'accéder avec succès à l'interface ciblée.</p>
+                        
+                        <div style="background: #f8fafc; border-left: 4px solid #48bdb2; padding: 12px 16px; margin: 20px 0; font-size: 13px; color: #334155;">
+                            <strong>Interface sélectionnée :</strong> ${interfaceName}<br>
+                            <strong>Date / Heure :</strong> ${loginTime}
+                        </div>
+
+                        <p style="color: #64748b; font-size: 13px; line-height: 1.5;">Si vous êtes à l'origine de cette action, vous pouvez ignorer cet e-mail en toute sécurité.</p>
+                        
+                        <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 20px; margin: 25px auto 0 auto; max-width: 450px; text-align: center;">
+                            <p style="color: #dc2626; font-size: 13px; font-weight: bold; margin: 0 0 8px 0;">Ce n'est pas vous ?</p>
+                            <p style="color: #7f1d1d; font-size: 12px; margin: 0 0 15px 0; line-height: 1.4;">Si vous n'avez pas initié cette connexion, sécurisez votre compte immédiatement.</p>
+                            <a href="${resetSecurityLink}" style="background-color: #dc2626; color: white; padding: 10px 20px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 12px; display: inline-block;">Sécuriser mon compte</a>
+                        </div>
+
+                        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 25px 0;">
+                        <p style="font-size: 12px; color: #94a3b8; text-align: center; font-weight: bold; margin: 0;">RoomCheck - Centillion.Online</p>
+                    </div>
+                </div>
+            `;
+
+            await fetch('https://api.brevo.com/v3/smtp/email', {
+                method: 'POST',
+                headers: {
+                    'accept': 'application/json',
+                    'api-key': process.env.BREVO_SMTP_PASS,
+                    'content-type': 'application/json'
+                },
+                body: JSON.stringify({
+                    sender: { name: "RoomCheck Security", email: "noreply@centillion.online" },
+                    to: [{ email: userEmail }],
+                    subject: `Alerte de connexion - ${interfaceName}`,
+                    htmlContent: htmlAlertContent,
+                    textContent: `Bonjour ${userName},\n\nVous venez d'accéder à l'interface : ${interfaceName} (${loginTime}).\n\nSi ce n'est pas vous, sécurisez votre compte ici : ${resetSecurityLink}`
+                })
+            });
+        }
+
+        return res.json({ success: true, message: "Accès enregistré et e-mail d'alerte envoyé." });
+    } catch (error) {
+        console.error("Erreur enregistrement accès interface :", error);
+        return res.status(500).json({ success: false, message: "Erreur serveur." });
     }
 });
 
