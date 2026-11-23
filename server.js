@@ -633,7 +633,7 @@ app.post('/api/log-interface-access', async (req, res) => {
                     ${getStandardEmailHeader('Alerte Sécurité')}
                     <div style="padding: 30px 25px;">
                         <p style="color: #334155; font-size: 15px; line-height: 1.5; margin-top: 0;">Bonjour <strong>${userName}</strong>,</p>
-                        <p style="color: #334155; font-size: 15px; line-height: 1.5;">Vous venez d'accéder avec succès à l'interface ciblée.</p>
+                        <p style="color: #334155; font-size: 15px; line-height: 1.5;">Vous venez d'accéder avec succès à l'une de vos interfaces RoomCheck.</p>
                         
                         <div style="background: #f8fafc; border-left: 4px solid #48bdb2; padding: 12px 16px; margin: 20px 0; font-size: 13px; color: #334155;">
                             <strong>Interface sélectionnée :</strong> ${interfaceName}<br>
