@@ -31,10 +31,9 @@ window.executeDbAction = async function executeDbAction(action, collectionName, 
                 window.location.hostname === '127.0.0.1' || 
                 window.location.hostname === '';
 
-// Si on est en local, on force l'API à pointer sur le port 3000 de votre serveur Node.js
 const baseUrl = isLocal
-    ? 'http://localhost:3000' 
-    : 'https://roomcheck-1.onrender.com';
+    ? window.location.origin
+    : 'https://rc.centillion.online';
 
     try {
         // 3. Choix dynamique de l'URL et du corps de la requête selon l'action
